@@ -3,15 +3,22 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Protocolo 8R+ | Base Responsiva e Pronta para GitHub</title>
+    <title>Protocolo 8R+ | Versão Robusta com Gemini Chatbot</title>
     <!-- Load Tailwind CSS for Responsive and Utility-First Styling -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons for aesthetic elements -->
+    <script src="https://unpkg.com/lucide@latest"></script>
     <style>
         /* Define the Inter font as default */
         body { font-family: 'Inter', sans-serif; }
         /* Focus styles for inputs and text areas */
         input:focus, textarea:focus { outline: none; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.4); }
         .card-shadow { box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); }
+        .chat-scroll { max-height: 70vh; overflow-y: auto; }
+        /* Custom scrollbar for aesthetics */
+        .chat-scroll::-webkit-scrollbar { width: 6px; }
+        .chat-scroll::-webkit-scrollbar-thumb { background: #818cf8; border-radius: 3px; }
+        .chat-scroll::-webkit-scrollbar-track { background: #eef2ff; }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
@@ -21,23 +28,24 @@
 
     <script type="module">
         // ===========================================================================
-        // 🛠️ BLOCK 0: FIREBASE CONFIGURATION & GLOBAL STATE
-        // This section handles environment variables and application state management.
+        // 🛠️ BLOCK 0: FIREBASE & GEMINI CONFIGURATION & GLOBAL STATE
         // ===========================================================================
         
         // Firebase Imports (CDN Version)
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, onSnapshot, getDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, getDoc, setLogLevel, writeBatch, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // Environment Variables (Expected to be injected in Canvas environment)
         const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        const GEMINI_API_KEY = ""; // Kept empty, handled by the environment
+        const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`;
         
         // Application Global State
         let appState = {
-            user: null,
+            user: null, // { name, token, role, userId (mock), firebaseUid }
             currentScreen: 'Dashboard',
             db: null,
             auth: null,
@@ -45,17 +53,21 @@
             metrics: { frequenciaCardiaca: 0, nivelEstresse: 0 },
             aiAdjustment: null,
             isLoading: false, 
-            goals: { focus: '', nextSteps: '' }
+            goals: { focus: '', nextSteps: '' },
+            chatHistory: [], // Stores { role: 'user' | 'model', parts: [{ text: '...' }] }
+            chatIsTyping: false
         };
 
         // Firestore Path Constants (Adhering to security rules)
         const PUBLIC_METRICS_PATH = `/artifacts/${appId}/public/data/health_metrics/patient_001`;
-        const getTherapyLogPath = (caregiverUserId) => `/artifacts/${appId}/users/${caregiverUserId}/therapy_notes/patient_002_log`;
-        const getPatientGoalsPath = (patientUserId) => `/artifacts/${appId}/users/${patientUserId}/goals/current_focus`;
+
+        // The path must use the AUTHENTICATED user's UID (firebaseUid) for security rules compliance.
+        // We use the authenticated UID for private data like logs and patient goals.
+        const getTherapyLogPath = (authUserId) => `/artifacts/${appId}/users/${authUserId}/therapy_notes/patient_002_log`;
+        const getPatientGoalsPath = (authUserId) => `/artifacts/${appId}/users/${authUserId}/goals/current_focus`;
 
         // ===========================================================================
         // 🌟 BLOCK 1: MOCK BACKEND SERVICES (PROTECTION & COMPASSION PILLARS)
-        // These mocks simulate complex server-side logic (Encryption, Auth, AI).
         // ===========================================================================
 
         // --- 1.1. AES-256 Mock Encryption (Protection Pillar) ---
@@ -77,14 +89,18 @@
         };
 
         // --- 1.2. Mock JWT Authentication (Protection Pillar) ---
-        const mockAuthLogin = (username, password) => {
-            if (username === 'medico' && password === '123') {
+        // Sets the mock/logical user ID based on the role
+        const MOCK_CARE_ID = 'medic001';
+        const MOCK_PATIENT_ID = 'patient002';
+        
+        const mockAuthLogin = (role) => {
+            if (role === 'medico') {
                 const encryptedName = mockEncrypt("Dr. João Custódio (Cuidador)");
-                return { token: 'jwt.medic.token', userId: 'medic001', name: "Dr. João Custódio", role: 'Cuidador', encryptedName };
+                return { token: 'jwt.medic.token', userId: MOCK_CARE_ID, name: "Dr. João Custódio", role: 'Cuidador', encryptedName };
             }
-            if (username === 'paciente' && password === '123') {
+            if (role === 'paciente') {
                 const encryptedName = mockEncrypt("Maria da Silva (Paciente)");
-                return { token: 'jwt.patient.token', userId: 'patient002', name: "Maria da Silva", role: 'Paciente', encryptedName };
+                return { token: 'jwt.patient.token', userId: MOCK_PATIENT_ID, name: "Maria da Silva", role: 'Paciente', encryptedName };
             }
             return null;
         };
@@ -113,7 +129,6 @@
         
         // ===========================================================================
         // 🚀 BLOCK 2: STATE MANAGEMENT AND CORE RENDERING
-        // Handles navigation, logout, state updates, and the main render loop.
         // ===========================================================================
 
         const navigate = (screen) => {
@@ -121,11 +136,27 @@
             renderApp();
         };
 
-        const handleLogout = () => {
+        const handleLogout = async () => {
             localStorage.clear();
+            
+            // Clear all state variables
             appState.user = null;
             appState.aiAdjustment = null;
+            appState.metrics = { frequenciaCardiaca: 0, nivelEstresse: 0 };
+            appState.goals = { focus: '', nextSteps: '' };
+            appState.chatHistory = [];
             appState.currentScreen = 'Dashboard';
+            
+            // Sign out from Firebase to clear the anonymous session
+            if (appState.auth) {
+                try {
+                    await signOut(appState.auth);
+                    // Re-authenticate anonymously to keep the connection alive but reset user state
+                    await signInAnonymously(appState.auth);
+                } catch (e) {
+                    console.error("Erro ao fazer logout do Firebase:", e);
+                }
+            }
             renderApp();
         };
 
@@ -143,18 +174,39 @@
             appState.goals = newGoals;
             renderApp();
         };
+        
+        // Loads mock user data immediately for faster rendering
+        const loadMockUserFromLocalStorage = () => {
+            const token = localStorage.getItem('token');
+            const encryptedName = localStorage.getItem('encryptedName');
+            const role = localStorage.getItem('role');
+            const userId = localStorage.getItem('userId');
+            
+            if (token && encryptedName && role && userId) {
+                const name = mockDecrypt(encryptedName); 
+                // firebaseUid is NOT stored in localStorage, it's set after onAuthStateChanged
+                appState.user = { name, token, role, userId, firebaseUid: null }; 
+                appState.currentScreen = role === 'Cuidador' ? 'Dashboard' : 'Progresso';
+                appState.isLoading = false; 
+                return true;
+            }
+            appState.user = null;
+            appState.isLoading = false;
+            return false;
+        };
 
         // Main function that redraws the entire application UI
         const renderApp = () => {
             const appContainer = document.getElementById('app');
             let html = '';
 
-            if (appState.isLoading) {
-                html = renderLoadingScreen();
-            } else if (appState.user) {
-                html = renderHeader() + renderMainContent();
-            } else {
+            if (!appState.authReady) {
+                html = renderLoadingScreen("A ligar ao Núcleo de Dados...");
+            } else if (!appState.user && appState.authReady) { 
                 html = renderLoginScreen();
+            } else if (appState.user) {
+                // If user is logged in, show the main application UI
+                html = renderHeader() + renderMainContent();
             }
             
             // Add fixed footer
@@ -163,20 +215,16 @@
             appContainer.innerHTML = html;
             
             // Re-attach event listeners
-            if (appState.isLoading === false) { 
-                if (appState.user) {
-                    attachHeaderEvents();
-                    attachMainContentEvents();
-                } else {
-                    attachLoginEvents();
-                }
+            if (appState.user) {
+                attachHeaderEvents();
+                attachMainContentEvents();
+            } else if (appState.authReady) {
+                attachLoginEvents();
             }
-            
         };
         
         // ===========================================================================
         // 🖥️ BLOCK 3: COMPONENT RENDERING (HTML GENERATION)
-        // Focuses on generating the HTML structure for each part of the UI.
         // ===========================================================================
 
         const getStatusColor = (predicao) => {
@@ -185,9 +233,12 @@
             return 'bg-yellow-500 border-yellow-500';
         };
         
-        const renderLoadingScreen = () => `
+        const renderLoadingScreen = (message) => `
             <div class="min-h-screen flex items-center justify-center bg-gray-50 p-4">
-                <p class="text-xl font-medium text-indigo-600 animate-pulse">Conectando ao Núcleo de Dados...</p>
+                <div class="text-center">
+                    <div class="w-12 h-12 border-4 border-indigo-600 border-dotted rounded-full animate-spin mx-auto mb-3"></div>
+                    <p class="text-xl font-medium text-indigo-600 animate-pulse">${message}</p>
+                </div>
             </div>
         `;
 
@@ -196,22 +247,35 @@
             const isCaregiver = appState.user?.role === 'Cuidador';
             const navItems = isCaregiver 
                 ? ['Dashboard', 'Monitoramento', 'Relatórios', 'Perfil']
-                : ['Progresso', 'Metas', 'Respiração', 'Perfil'];
+                : ['Progresso', 'Metas', 'Suporte', 'Perfil']; // 'Suporte' is the new Chatbot screen
             
-            const navButtons = navItems.map(screen => `
-                <button
-                    data-screen="${screen}"
-                    class="nav-button px-3 py-1 rounded-full text-sm font-medium transition-all text-white
-                    ${
-                        appState.currentScreen === screen ? 'bg-indigo-500 shadow-md transform scale-105' : 'hover:bg-indigo-600 bg-indigo-700/50'
-                    }
-                >
-                    ${screen}
-                </button>
-            `).join('');
+            const navButtons = navItems.map(screen => {
+                let iconName;
+                if (screen === 'Dashboard') iconName = 'gauge';
+                else if (screen === 'Monitoramento') iconName = 'activity';
+                else if (screen === 'Relatórios') iconName = 'file-text';
+                else if (screen === 'Progresso') iconName = 'bar-chart-2';
+                else if (screen === 'Metas') iconName = 'target';
+                else if (screen === 'Suporte') iconName = 'message-circle';
+                else if (screen === 'Perfil') iconName = 'user';
+                else iconName = 'square';
+
+                return `
+                    <button
+                        data-screen="${screen}"
+                        class="nav-button px-3 py-1 rounded-full text-sm font-medium transition-all text-white flex items-center
+                        ${
+                            appState.currentScreen === screen ? 'bg-indigo-500 shadow-md transform scale-105' : 'hover:bg-indigo-600 bg-indigo-700/50'
+                        }"
+                    >
+                        <i data-lucide="${iconName}" class="w-4 h-4 mr-1"></i>
+                        ${screen}
+                    </button>
+                `;
+            }).join('');
 
             return `
-                <header class="bg-gradient-to-r from-blue-900 to-indigo-800 text-white card-shadow p-4 sticky top-0 z-10">
+                <header class="bg-gradient-to-r from-blue-900 to-indigo-800 text-white card-shadow p-4 sticky top-0 z-20">
                     <div class="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center sm:space-y-0 space-y-3">
                         <h1 class="text-xl sm:text-2xl font-extrabold tracking-tight cursor-pointer" id="logo-nav">
                             Protocolo 8R+
@@ -220,12 +284,12 @@
                             ${navButtons}
                         </nav>
                         <div class="flex items-center space-x-4">
-                            <span class="text-xs sm:text-sm font-light">${appState.user.role === 'Cuidador' ? 'MÉDICO' : 'PACIENTE'}: ${appState.user.name.split(' ')[0]}</span>
+                            <span class="text-xs sm:text-sm font-light">UID: ${appState.user.firebaseUid ? appState.user.firebaseUid.substring(0, 8) + '...' : 'N/A'}</span>
                             <button
                                 id="logout-button"
-                                class="px-3 py-1 rounded-full text-sm font-medium bg-red-500 hover:bg-red-600 transition-all shadow-md"
+                                class="px-3 py-1 rounded-full text-sm font-medium bg-red-500 hover:bg-red-600 transition-all shadow-md flex items-center"
                             >
-                                Sair
+                                <i data-lucide="log-out" class="w-4 h-4 mr-1"></i> Sair
                             </button>
                         </div>
                     </div>
@@ -240,55 +304,77 @@
                 navigate(defaultScreen);
             });
             document.querySelectorAll('.nav-button').forEach(button => {
-                button.addEventListener('click', (e) => navigate(e.target.dataset.screen));
+                button.addEventListener('click', (e) => navigate(e.currentTarget.dataset.screen));
             });
+            // Re-render lucide icons after injecting HTML
+            lucide.createIcons();
         };
 
-        // --- 3.2. Login Screen ---
+        // --- 3.2. Login Screen (Refactored for clarity) ---
         const renderLoginScreen = (error = '') => `
             <div class="min-h-screen flex items-center justify-center bg-gray-50 p-4">
                 <div class="bg-white p-6 sm:p-8 rounded-xl card-shadow w-full max-w-sm sm:max-w-md border-t-8 border-indigo-600">
-                    <h2 class="text-2xl sm:text-3xl font-bold text-center text-gray-900 mb-6">Acesso ao Protocolo 8R+</h2>
+                    <h2 class="text-2xl sm:text-3xl font-bold text-center text-gray-900 mb-2">Acesso ao Protocolo 8R+</h2>
+                    <p class="text-center text-gray-500 mb-6">Escolha o seu perfil para entrar na simulação.</p>
                     ${error ? `<p id="login-error" class="text-red-600 bg-red-100 p-2 rounded-lg mb-4 text-sm text-center">${error}</p>` : ''}
                     
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Nome de Usuário</label>
-                    <input type="text" id="username-input" value="medico" class="w-full p-3 border border-gray-300 rounded-lg mb-4" placeholder="medico ou paciente"/>
-
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Senha</label>
-                    <input type="password" id="password-input" value="123" class="w-full p-3 border border-gray-300 rounded-lg mb-6" placeholder="••••••••"/>
-
-                    <button id="login-button" class="w-full bg-indigo-600 text-white py-3 rounded-lg font-semibold hover:bg-indigo-700 transition duration-150 card-shadow transform hover:scale-[1.01]">
-                        Entrar (Simulação JWT)
-                    </button>
-                    <p class="mt-4 text-xs text-center text-gray-500">
-                        🔓 **CONTAS TESTE:** medico/123 (Cuidador) | paciente/123 (Paciente)
+                    <p class="mt-4 text-xs text-center text-gray-500 mb-4">
+                        🔓 **Contas de Teste:** A palavra-passe é **123** para ambos.
                     </p>
+
+                    <input type="password" id="password-input" value="123" class="w-full p-3 border border-gray-300 rounded-lg mb-6 focus:border-indigo-500" placeholder="Palavra-passe (123)"/>
+                    
+                    <div class="space-y-4">
+                        <button id="login-medico" data-role="medico" class="login-button w-full py-3 rounded-lg font-semibold bg-indigo-600 text-white hover:bg-indigo-700 transition card-shadow flex items-center justify-center">
+                            <i data-lucide="stethoscope" class="w-5 h-5 mr-2"></i> Entrar como Cuidador (Médico)
+                        </button>
+                        <button id="login-paciente" data-role="paciente" class="login-button w-full py-3 rounded-lg font-semibold bg-teal-600 text-white hover:bg-teal-700 transition card-shadow flex items-center justify-center">
+                            <i data-lucide="heart" class="w-5 h-5 mr-2"></i> Entrar como Paciente
+                        </button>
+                    </div>
                 </div>
             </div>
         `;
 
         const attachLoginEvents = () => {
-            document.getElementById('login-button')?.addEventListener('click', handleLogin);
+            document.querySelectorAll('.login-button').forEach(button => {
+                button.addEventListener('click', (e) => {
+                    const role = e.currentTarget.dataset.role;
+                    const password = document.getElementById('password-input').value;
+                    handleLogin(role, password);
+                });
+            });
+            lucide.createIcons();
         };
 
-        const handleLogin = () => {
-            const username = document.getElementById('username-input').value;
-            const password = document.getElementById('password-input').value;
-            
-            const user = mockAuthLogin(username, password);
+        const handleLogin = async (role, password) => {
+            if (password !== '123') {
+                document.getElementById('app').innerHTML = renderLoginScreen('Palavra-passe incorreta. Tente 123.') + renderFooter();
+                attachLoginEvents();
+                return;
+            }
+
+            const user = mockAuthLogin(role);
             
             if (user) {
+                // Store mock data
                 localStorage.setItem('token', user.token);
-                localStorage.setItem('userId', user.userId);
+                localStorage.setItem('userId', user.userId); // Mock ID
                 localStorage.setItem('encryptedName', user.encryptedName);
                 localStorage.setItem('role', user.role);
                 
-                appState.user = user;
+                // Set the mock user profile. firebaseUid will be updated by onAuthStateChanged soon.
+                appState.user = { ...user, firebaseUid: null }; 
                 appState.currentScreen = user.role === 'Cuidador' ? 'Dashboard' : 'Progresso';
-                renderApp();
+
+                // We must sign out and re-sign in the anonymous user to force the
+                // onAuthStateChanged to fire with the new session ID for security rules.
+                await signOut(appState.auth);
+                await signInAnonymously(appState.auth);
+
+                renderApp(); 
             } else {
-                // Re-render login screen with error
-                document.getElementById('app').innerHTML = renderLoginScreen('Credenciais inválidas. Tente Médico/123 ou Paciente/123') + renderFooter();
+                document.getElementById('app').innerHTML = renderLoginScreen('Erro inesperado no login.') + renderFooter();
                 attachLoginEvents();
             }
         };
@@ -301,20 +387,20 @@
             // Get current DOM state before re-rendering
             const statusElement = document.getElementById('log-status');
             const noteTextarea = document.getElementById('note-textarea');
-            const status = statusElement ? statusElement.textContent : '';
+            const status = statusElement ? statusElement.textContent : 'Aguardando ação...';
             const note = noteTextarea ? noteTextarea.value : '';
 
             
             // HTML Rendering for the Log
             return `
                 <div class="bg-gray-50 p-4 rounded-xl shadow-inner border border-gray-200 mt-4">
-                    <h4 class="text-base sm:text-lg font-bold text-gray-800 border-b pb-2 mb-3">
-                        Registro de Ação Terapêutica (Pilar da Proteção - Log de Governança)
+                    <h4 class="text-base sm:text-lg font-bold text-gray-800 border-b pb-2 mb-3 flex items-center">
+                         <i data-lucide="book-open" class="w-5 h-5 mr-2 text-indigo-600"></i> Registo de Ação Terapêutica (Pilar da Proteção)
                     </h4>
                     <textarea
                         id="note-textarea"
-                        placeholder="Adicione suas notas sobre a decisão (Obrigatório)"
-                        class="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-sm"
+                        placeholder="Adicione as suas notas sobre a decisão (Obrigatório para registo)..."
+                        class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-sm"
                         rows="3"
                     >${note}</textarea>
                     <div class="mt-3 flex flex-col sm:flex-row justify-end space-y-2 sm:space-y-0 sm:space-x-3">
@@ -322,17 +408,15 @@
                             id="approve-log-button"
                             data-action="Aprovado e Executado"
                             class="w-full sm:w-auto px-4 py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 transition disabled:opacity-50 text-sm"
-                            ${note.trim().length === 0 ? 'disabled' : ''}
                         >
-                            Aprovar & Registrar
+                            <i data-lucide="check-circle" class="w-4 h-4 mr-1 inline-block"></i> Aprovar & Registar
                         </button>
                         <button
                             id="reject-log-button"
                             data-action="Rejeitado/Ajuste Manual"
                             class="w-full sm:w-auto px-4 py-2 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 transition disabled:opacity-50 text-sm"
-                            ${note.trim().length === 0 ? 'disabled' : ''}
                         >
-                            Rejeitar & Registrar
+                            <i data-lucide="x-circle" class="w-4 h-4 mr-1 inline-block"></i> Rejeitar & Registar
                         </button>
                     </div>
                     <p id="log-status" class="mt-3 text-sm text-center font-medium text-gray-700">${status}</p>
@@ -359,29 +443,29 @@
 
             return `
                 <div class="max-w-7xl mx-auto p-4 sm:p-6 bg-gray-50 min-h-[90vh]">
-                    <h2 class="text-2xl sm:text-4xl font-extrabold text-gray-900 mb-6 border-b pb-2">
-                        Dashboard do Cuidador | Visão Integrada (IA)
+                    <h2 class="text-2xl sm:text-4xl font-extrabold text-gray-900 mb-6 border-b pb-2 flex items-center">
+                        <i data-lucide="dashboard" class="w-8 h-8 mr-2 text-indigo-600"></i> Dashboard do Cuidador | Visão Integrada (IA)
                     </h2>
                     
                     <div class="grid md:grid-cols-3 gap-4 sm:gap-6 mb-8">
                         <!-- Monitoring Block (1 column on all screens, but takes 1/3 on md+) -->
-                        <div class="bg-white p-6 rounded-xl card-shadow border-l-4 border-indigo-500">
-                            <h3 class="text-lg sm:text-xl font-semibold text-gray-700 mb-4 flex items-center"><span class="text-indigo-500 mr-2">❤️</span> Monitoramento Real-Time (Firestore)</h3>
-                            <p class="text-3xl sm:text-4xl font-bold text-gray-800">${metrics.frequenciaCardiaca.toFixed(1)} <span class="text-base sm:text-lg font-normal">BPM</span></p>
+                        <div class="bg-white p-6 rounded-xl card-shadow border-l-4 border-indigo-500 animate-pulse-data">
+                            <h3 class="text-lg sm:text-xl font-semibold text-gray-700 mb-4 flex items-center"><i data-lucide="activity" class="w-5 h-5 mr-2 text-indigo-500"></i> Monitoramento em Tempo Real</h3>
+                            <p class="text-3xl sm:text-4xl font-bold text-gray-800">${metrics.frequenciaCardiaca.toFixed(1)} <span class="text-base sm:text-lg font-normal">BPM (F. Cardíaca)</span></p>
                             <p class="text-3xl sm:text-4xl font-bold text-gray-800 mt-2">${metrics.nivelEstresse.toFixed(1)} <span class="text-base sm:text-lg font-normal">Estresse (0-10)</span></p>
-                            <p class="text-xs text-green-500 mt-3">✅ Dados persistentes e em tempo real.</p>
+                            <p class="text-xs text-green-500 mt-3">✅ Dados persistentes e em tempo real (atualiza a cada 5s).</p>
                         </div>
 
                         <!-- AI and Log Block (Spans 2 columns on md+) -->
                         <div class="md:col-span-2 bg-white p-6 rounded-xl card-shadow border-l-4 border-purple-600">
-                            <h3 class="text-lg sm:text-xl font-semibold text-purple-700 mb-4 flex items-center"><span class="text-purple-600 mr-2">🧠</span> Motor de Terapia (IA Adaptativa)</h3>
+                            <h3 class="text-lg sm:text-xl font-semibold text-purple-700 mb-4 flex items-center"><i data-lucide="brain" class="w-5 h-5 mr-2 text-purple-600"></i> Motor de Terapia (IA Adaptativa)</h3>
                             
                             <button
                                 id="request-ai-button"
                                 ${loading ? 'disabled' : ''}
                                 class="w-full bg-purple-600 text-white py-2 rounded-lg font-semibold hover:bg-purple-700 transition duration-150 disabled:opacity-50 flex justify-center items-center text-sm sm:text-base"
                             >
-                                ${loading ? 'Analisando dados...' : 'Solicitar Ajuste Terapêutico da IA'}
+                                ${loading ? '<i data-lucide="loader-2" class="w-5 h-5 mr-2 animate-spin"></i> A analisar dados...' : '<i data-lucide="cpu" class="w-5 h-5 mr-2"></i> Solicitar Ajuste Terapêutico da IA'}
                             </button>
 
                             ${adjustmentHtml}
@@ -394,22 +478,131 @@
             `;
         };
         
-        // --- 3.5. Goal Setting Screen (Patient) ---
+        // --- 3.5. Patient Chatbot Screen (Suporte) ---
+        const renderChatbotScreen = () => {
+            const historyHtml = appState.chatHistory.map(msg => {
+                const isModel = msg.role === 'model';
+                const sourceList = msg.sources && msg.sources.length > 0 
+                    ? `<div class="mt-2 pt-2 border-t border-gray-200 text-xs text-gray-500">
+                           <p class="font-semibold">Fontes:</p>
+                           ${msg.sources.map((src, i) => `<a href="${src.uri}" target="_blank" class="block truncate hover:text-indigo-600">${i + 1}. ${src.title || 'Link'}</a>`).join('')}
+                       </div>`
+                    : '';
+                
+                return `
+                    <div class="flex ${isModel ? 'justify-start' : 'justify-end'} mb-4">
+                        <div class="max-w-3/4 p-4 rounded-xl ${isModel ? 'bg-indigo-100 text-gray-800 rounded-bl-none' : 'bg-indigo-600 text-white rounded-br-none'} card-shadow">
+                            <p class="font-semibold mb-1 ${isModel ? 'text-indigo-700' : 'text-indigo-200'}">${isModel ? 'Terapeuta 8R+' : 'Você'}</p>
+                            <p>${msg.parts[0].text}</p>
+                            ${isModel ? sourceList : ''}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            return `
+                <div class="max-w-4xl mx-auto p-4 sm:p-6 bg-gray-50 min-h-[90vh]">
+                    <h2 class="text-2xl sm:text-4xl font-extrabold text-gray-900 mb-6 border-b pb-2 flex items-center">
+                        <i data-lucide="message-circle" class="w-8 h-8 mr-2 text-indigo-600"></i> Suporte de Co-criação (Terapeuta Digital)
+                    </h2>
+                    <div class="bg-white p-6 sm:p-8 rounded-xl card-shadow">
+                        <div id="chat-window" class="chat-scroll mb-6 p-2">
+                            ${historyHtml}
+                            ${appState.chatIsTyping ? `
+                                <div class="flex justify-start mb-4">
+                                    <div class="max-w-3/4 p-4 rounded-xl bg-indigo-100 text-gray-800 rounded-bl-none card-shadow">
+                                        <div class="flex items-center space-x-2">
+                                            <div class="w-2 h-2 bg-indigo-600 rounded-full animate-bounce delay-100"></div>
+                                            <div class="w-2 h-2 bg-indigo-600 rounded-full animate-bounce delay-200"></div>
+                                            <div class="w-2 h-2 bg-indigo-600 rounded-full animate-bounce delay-300"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            ` : ''}
+                        </div>
+                        
+                        <form id="chat-form" class="flex items-center space-x-3">
+                            <input
+                                type="text"
+                                id="chat-input"
+                                placeholder="Pergunte o que precisar ou peça um exercício de respiração..."
+                                class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 disabled:bg-gray-100"
+                                ${appState.chatIsTyping ? 'disabled' : ''}
+                            />
+                            <button
+                                type="submit"
+                                id="chat-send-button"
+                                class="bg-indigo-600 text-white p-3 rounded-lg hover:bg-indigo-700 transition disabled:opacity-50"
+                                ${appState.chatIsTyping ? 'disabled' : ''}
+                            >
+                                <i data-lucide="send" class="w-5 h-5"></i>
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            `;
+        };
+        
+        // --- 3.6. Placeholder Screens (Simplified) ---
+        const renderProfileScreen = () => {
+            const encryptedName = localStorage.getItem('encryptedName');
+            const profileName = encryptedName ? mockDecrypt(encryptedName) : 'Utilizador Desconhecido';
+            const protocol = mockDecrypt(mockEncrypt("Fase 1: Ajuste Imunológico e Neuroemocional - Protocolo Alpha-1"));
+            
+            return `
+                <div class="max-w-3xl mx-auto p-4 sm:p-6 bg-gray-50 min-h-[90vh]">
+                    <h2 class="text-2xl sm:text-4xl font-extrabold text-gray-900 mb-8 border-b pb-2 flex items-center">
+                        <i data-lucide="lock" class="w-8 h-8 mr-2 text-indigo-600"></i> Perfil do Utilizador (Pilar de Proteção AES-256)
+                    </h2>
+                    <div class="bg-white p-6 sm:p-8 rounded-xl card-shadow space-y-6 border-l-8 border-indigo-600">
+                        <div>
+                            <label class="text-sm font-medium text-gray-500 block mb-1">Nome Desencriptado</label>
+                            <p class="text-xl font-bold text-gray-900">${profileName}</p>
+                        </div>
+                        <div>
+                            <label class="text-sm font-medium text-gray-500 block mb-1">Protocolo 8R+ Atual (Dado Sensível)</label>
+                            <p class="text-lg text-gray-800 bg-indigo-50 p-3 rounded-lg border-l-4 border-indigo-400">${protocol}</p>
+                        </div>
+                        <div>
+                            <label class="text-sm font-medium text-gray-500 block mb-1">ID Seguro do Firebase (UID) <span class="text-xs text-red-500">(Chave de Permissão)</span></label>
+                            <p class="text-sm text-gray-600 bg-gray-100 p-2 rounded-lg break-all">${appState.user?.firebaseUid || 'N/A'}</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+        };
+        
+        // Render functions for other screens (Progresso, Metas, Placeholders...)
+        // ... (renderGoalSettingScreen, renderPatientProgressScreen, renderPlaceholderScreen remain the same for brevity and focus on new features)
+        
+        const renderPatientProgressScreen = () => `
+            <div class="max-w-4xl mx-auto p-4 sm:p-6 bg-gray-50 min-h-[90vh]">
+                <h2 class="text-2xl sm:text-4xl font-extrabold text-gray-900 mb-8 border-b pb-2 flex items-center">
+                    <i data-lucide="heart" class="w-8 h-8 mr-2 text-indigo-600"></i> O Meu Progresso 8R+ (Pilar de Co-criação)
+                </h2>
+                <div class="bg-white p-6 sm:p-8 rounded-xl card-shadow">
+                    <h3 class="text-xl sm:text-2xl font-semibold text-gray-800 mb-4">Métricas Vivas</h3>
+                    <p class="text-lg sm:text-xl text-gray-700 font-medium">Frequência Cardíaca: <span class="text-indigo-600 font-bold">${appState.metrics.frequenciaCardiaca.toFixed(1)} BPM</span></p>
+                    <p class="text-lg sm:text-xl text-gray-700 font-medium mt-2">Nível de Estresse: <span class="text-indigo-600 font-bold">${appState.metrics.nivelEstresse.toFixed(1)} (0-10)</span></p>
+                    <p class="mt-6 text-sm text-green-500">Dados em tempo real via Firestore.</p>
+                </div>
+            </div>
+        `;
+
         const renderGoalSettingScreen = (status = '') => {
             const goals = appState.goals;
             
-            // Get current DOM state before re-rendering
-            const goalsFocusElement = document.getElementById('goals-focus-textarea');
-            const goalsNextStepsElement = document.getElementById('goals-next-steps-textarea');
-            const currentFocus = goalsFocusElement ? goalsFocusElement.value : goals.focus;
-            const currentNextSteps = goalsNextStepsElement ? goalsNextStepsElement.value : goals.nextSteps;
+            const goalsFocusTextarea = document.getElementById('goals-focus-textarea');
+            const goalsNextStepsTextarea = document.getElementById('goals-next-steps-textarea');
+            const currentFocus = goalsFocusTextarea ? goalsFocusTextarea.value : goals.focus;
+            const currentNextSteps = goalsNextStepsTextarea ? goalsNextStepsTextarea.value : goals.nextSteps;
 
             const isDisabled = currentFocus.trim() === '' || currentNextSteps.trim() === '';
 
             return `
                 <div class="max-w-4xl mx-auto p-4 sm:p-6 bg-gray-50 min-h-[90vh]">
-                    <h2 class="text-2xl sm:text-4xl font-extrabold text-gray-900 mb-8 border-b pb-2">
-                        Metas e Foco Pessoal (Pilar da Co-criação)
+                    <h2 class="text-2xl sm:text-4xl font-extrabold text-gray-900 mb-8 border-b pb-2 flex items-center">
+                        <i data-lucide="target" class="w-8 h-8 mr-2 text-indigo-600"></i> Metas e Foco Pessoal (Pilar da Co-criação)
                     </h2>
                     <div class="bg-white p-6 sm:p-8 rounded-xl card-shadow border-l-8 border-teal-600">
                         <p class="text-gray-600 mb-6 text-sm sm:text-base">
@@ -433,9 +626,9 @@
                         <button
                             id="save-goals-button"
                             class="w-full py-3 bg-teal-600 text-white font-bold text-base sm:text-lg rounded-lg card-shadow hover:bg-teal-700 transition transform hover:scale-[1.01] disabled:opacity-50"
-                            ${isDisabled ? 'disabled' : ''}
+                            ${status || (isDisabled ? 'disabled' : '')}
                         >
-                            ${status || 'Salvar Minhas Metas'}
+                            ${status || 'Guardar as Minhas Metas'}
                         </button>
                         ${status ? `<p class="mt-3 text-center text-sm font-medium text-gray-700">${status}</p>` : ''}
                     </div>
@@ -443,50 +636,17 @@
             `;
         };
 
-        // --- 3.6. Placeholder Screens (Simplified) ---
-        const renderProfileScreen = () => {
-            const encryptedName = localStorage.getItem('encryptedName');
-            const profileName = mockDecrypt(encryptedName); 
-            const protocol = mockDecrypt(mockEncrypt("Fase 1: Ajuste Imunológico e Neuroemocional - Protocolo Alpha-1"));
-            
-            return `
-                <div class="max-w-3xl mx-auto p-4 sm:p-6 bg-gray-50 min-h-[90vh]">
-                    <h2 class="text-2xl sm:text-4xl font-extrabold text-gray-900 mb-8 border-b pb-2">Perfil do Usuário (Pilar de Proteção AES-256)</h2>
-                    <div class="bg-white p-6 sm:p-8 rounded-xl card-shadow space-y-6">
-                        <div>
-                            <label class="text-sm font-medium text-gray-500 block mb-1">Nome Decriptografado</label>
-                            <p class="text-xl font-bold text-gray-900">${profileName}</p>
-                        </div>
-                        <div>
-                            <label class="text-sm font-medium text-gray-500 block mb-1">Protocolo 8R+ Atual (Dado Sensível)</label>
-                            <p class="text-lg text-gray-800 bg-indigo-50 p-3 rounded-lg border-l-4 border-indigo-400">${protocol}</p>
-                        </div>
-                    </div>
-                </div>
-            `;
-        };
-        
-        const renderPatientProgressScreen = () => `
-            <div class="max-w-4xl mx-auto p-4 sm:p-6 bg-gray-50 min-h-[90vh]">
-                <h2 class="text-2xl sm:text-4xl font-extrabold text-gray-900 mb-8 border-b pb-2">Meu Progresso 8R+ (Pilar de Co-criação)</h2>
-                <div class="bg-white p-6 sm:p-8 rounded-xl card-shadow">
-                    <h3 class="text-xl sm:text-2xl font-semibold text-gray-800 mb-4">Métricas Vivas</h3>
-                    <p class="text-lg sm:text-xl text-gray-700 font-medium">Batimento Cardíaco: <span class="text-indigo-600 font-bold">${appState.metrics.frequenciaCardiaca.toFixed(1)} BPM</span></p>
-                    <p class="text-lg sm:text-xl text-gray-700 font-medium mt-2">Nível de Estresse: <span class="text-indigo-600 font-bold">${appState.metrics.nivelEstresse.toFixed(1)} (0-10)</span></p>
-                    <p class="mt-6 text-sm text-green-500">Dados em tempo real via Firestore.</p>
-                </div>
-            </div>
-        `;
-
         const renderPlaceholderScreen = (title) => `
             <div class="p-4 sm:p-6 text-center text-base sm:text-xl font-semibold text-gray-700 min-h-[90vh]">
-                <div class="mt-12 p-8 bg-white rounded-xl card-shadow">${title} - Placeholder</div>
+                <div class="mt-12 p-8 bg-white rounded-xl card-shadow flex items-center justify-center">
+                    <i data-lucide="hard-hat" class="w-6 h-6 mr-2 text-gray-500"></i> ${title} - Em Construção (Módulos Futuros)
+                </div>
             </div>
         `;
         
         const renderFooter = () => `
-            <footer class="p-4 text-center text-xs text-gray-500 border-t mt-4">
-                Sistema Protocolo 8R+ Integrado V7. **Totalmente Responsivo e Pronto para o GitHub.**
+            <footer class="p-4 text-center text-xs text-gray-500 border-t mt-4 sticky bottom-0 bg-gray-100 z-10">
+                Sistema Protocolo 8R+ Integrado V8. **Totalmente Responsivo.** UID Autenticado: ${appState.user?.firebaseUid || 'N/A'}
             </footer>
         `;
         
@@ -498,7 +658,7 @@
             if (userRole === 'Cuidador') {
                 switch (screen) {
                     case 'Dashboard': contentHtml = renderCaregiverDashboard(); break;
-                    case 'Monitoramento': contentHtml = renderPlaceholderScreen('Monitoramento Detalhado (Mód. Médico)'); break;
+                    case 'Monitoramento': contentHtml = renderPatientProgressScreen(); break; // Using progress screen for simplicity
                     case 'Relatórios': contentHtml = renderPlaceholderScreen('Relatório Analítico (Mód. Médico)'); break;
                     case 'Perfil': contentHtml = renderProfileScreen(); break;
                     default: contentHtml = renderCaregiverDashboard();
@@ -507,45 +667,40 @@
                 switch (screen) {
                     case 'Progresso': contentHtml = renderPatientProgressScreen(); break;
                     case 'Metas': contentHtml = renderGoalSettingScreen(); break;
-                    case 'Respiração': contentHtml = renderPlaceholderScreen('Exercício de Respiração Guiada (Mód. Co-criação)'); break;
+                    case 'Suporte': contentHtml = renderChatbotScreen(); break;
                     case 'Perfil': contentHtml = renderProfileScreen(); break;
                     default: contentHtml = renderPatientProgressScreen();
                 }
             }
-            return `<main>${contentHtml}</main>`;
+            return `<main class="pt-4">${contentHtml}</main>`;
         };
 
         // ===========================================================================
         // ⚡ BLOCK 4: EVENT HANDLERS AND INTERACTION LOGIC
-        // Functions that handle user input, button clicks, and data processing.
         // ===========================================================================
 
-        const handleAIRequest = async () => {
-            appState.isLoading = true;
-            updateAIAdjustment(null); 
-            
-            try {
-                const adjustment = await simulateAIAdjustment(appState.metrics);
-                updateAIAdjustment(adjustment);
-            } catch (error) {
-                updateAIAdjustment({ predicao: 'Erro', ajusteTerapeutico: 'Falha de comunicação com o Motor de Terapia.', mensagemAI: 'Erro.' });
-            } finally {
-                appState.isLoading = false;
-                renderApp(); 
-            }
-        };
-        
+        // --- 4.1. Therapy Log Fix and Handler ---
         const logTherapyAction = async (actionType) => {
-            const noteValue = document.getElementById('note-textarea').value;
+            const noteTextarea = document.getElementById('note-textarea');
+            const noteValue = noteTextarea.value;
+            
+            // CRITICAL FIX: Ensure we use the actual Firebase UID for the path
+            const authUserId = appState.user?.firebaseUid;
+            
             if (!appState.db || !appState.user || !appState.aiAdjustment || noteValue.trim().length === 0) {
-                document.getElementById('log-status').textContent = '⚠️ A nota é obrigatória para o registro.';
+                document.getElementById('log-status').textContent = '⚠️ A nota e a análise de IA são obrigatórias para o registo.';
                 return;
             }
-            
-            document.getElementById('log-status').textContent = 'Registrando...';
+            if (!authUserId) {
+                 document.getElementById('log-status').textContent = '⚠️ Erro de Autenticação: UID Firebase não encontrado. Aguarde pela autenticação.';
+                 console.error("Authentication Error: Firebase UID is null. Cannot proceed with secure write.");
+                 return;
+            }
+
+            document.getElementById('log-status').textContent = 'A registar... (Usando UID Seguro)';
             const logData = {
-                caregiverId: appState.user.userId,
-                patientId: 'patient002', 
+                caregiverId: appState.user.userId, // Mock/Logical ID
+                patientId: MOCK_PATIENT_ID, 
                 actionType: actionType,
                 aiRecommendation: appState.aiAdjustment.ajusteTerapeutico,
                 caregiverNote: noteValue,
@@ -553,50 +708,112 @@
                 timestamp: Date.now(),
             };
             
-            const logDocRef = doc(appState.db, getTherapyLogPath(appState.user.userId));
+            // Use the actual authenticated UID in the path, which respects security rules
+            const logDocRef = doc(appState.db, getTherapyLogPath(authUserId));
 
             try {
+                // Saving the log data under the authenticated user's path
                 await setDoc(logDocRef, { latestLog: logData }, { merge: true });
-                document.getElementById('log-status').textContent = '✅ Ação e Nota Registradas com Sucesso! (Privado)';
-                document.getElementById('note-textarea').value = ''; 
+                noteTextarea.value = ''; 
+                document.getElementById('log-status').textContent = '✅ Ação e Nota Registadas com Sucesso! (Privado)';
+                updateAIAdjustment(null); // Clear AI adjustment after logging
                 renderApp(); 
             } catch (error) {
-                console.error("Erro ao registrar Nota Terapêutica:", error);
-                document.getElementById('log-status').textContent = '❌ Erro ao salvar log.';
+                console.error("Erro ao registar Nota Terapêutica (Permissão/Caminho):", error);
+                document.getElementById('log-status').textContent = `❌ Erro ao guardar log (Permissões): ${error.message.substring(0, 50)}...`;
             }
         };
 
-        const handleGoalSave = async () => {
-            const goalsFocusTextarea = document.getElementById('goals-focus-textarea');
-            const goalsNextStepsTextarea = document.getElementById('goals-next-steps-textarea');
+        // --- 4.2. Gemini Chatbot Handler ---
+
+        // Helper for exponential backoff
+        const fetchWithRetry = async (url, options, maxRetries = 5) => {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.ok) return response;
+                } catch (error) {
+                    console.warn(`Tentativa ${i + 1} falhou. A tentar novamente em ${Math.pow(2, i)}s...`);
+                    if (i === maxRetries - 1) throw error;
+                    await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000));
+                }
+            }
+        };
+
+        const fetchGeminiResponse = async (userPrompt) => {
+            appState.chatIsTyping = true;
+            renderApp(); // Re-render to show typing indicator
+
+            const chatInput = document.getElementById('chat-input');
+            if (chatInput) chatInput.value = '';
             
-            const focus = goalsFocusTextarea.value;
-            const nextSteps = goalsNextStepsTextarea.value;
-            
-            appState.goals = { focus, nextSteps };
-            
-            const goalsDocRef = doc(appState.db, getPatientGoalsPath(appState.user.userId));
-            
-            // Re-render with saving status
-            document.getElementById('app').innerHTML = renderHeader() + renderMainContent({ status: 'Salvando...' }) + renderFooter();
-            attachHeaderEvents();
-            
+            // System instruction for the "Terapeuta Digital 8R+" persona
+            const systemPrompt = "Você é o 'Terapeuta Digital 8R+', um assistente de IA extremamente compassivo e protetor, focado em bem-estar e neuro-emocionalidade. Responda de forma breve (máximo 4 frases), carinhosa e objetiva, sempre terminando a sua resposta com uma sugestão de foco ou um pequeno exercício (como uma respiração profunda). Mantenha o tom de apoio, evitando diagnósticos diretos. Use o português de Portugal.";
+
+            const payload = {
+                contents: [{ parts: [{ text: userPrompt }] }],
+                tools: [{ "google_search": {} }], // Enable grounding for factual info
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+            };
+
+            const options = {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            };
+
             try {
-                await setDoc(goalsDocRef, appState.goals, { merge: true });
-                // Re-render with success status
-                document.getElementById('app').innerHTML = renderHeader() + renderGoalSettingScreen('✅ Metas salvas com sucesso! (Privado)') + renderFooter();
+                const response = await fetchWithRetry(GEMINI_API_URL, options);
+                const result = await response.json();
+
+                const candidate = result.candidates?.[0];
+
+                if (candidate && candidate.content?.parts?.[0]?.text) {
+                    const text = candidate.content.parts[0].text;
+                    
+                    let sources = [];
+                    const groundingMetadata = candidate.groundingMetadata;
+                    if (groundingMetadata && groundingMetadata.groundingAttributions) {
+                        sources = groundingMetadata.groundingAttributions
+                            .map(attribution => ({ uri: attribution.web?.uri, title: attribution.web?.title }))
+                            .filter(source => source.uri && source.title);
+                    }
+                    
+                    appState.chatHistory.push({ role: 'model', parts: [{ text: text }], sources: sources });
+                } else {
+                    appState.chatHistory.push({ role: 'model', parts: [{ text: 'Lamento, ocorreu um erro ao contactar o servidor de terapia digital.' }] });
+                }
             } catch (error) {
-                console.error("Erro ao salvar metas:", error);
-                // Re-render with error status
-                document.getElementById('app').innerHTML = renderHeader() + renderGoalSettingScreen('❌ Erro ao salvar metas.') + renderFooter();
+                console.error("Erro na API Gemini:", error);
+                appState.chatHistory.push({ role: 'model', parts: [{ text: 'Lamento, falha de conexão. Por favor, tente novamente.' }] });
+            } finally {
+                appState.chatIsTyping = false;
+                renderApp(); // Re-render to hide typing indicator and show response
+                
+                // Scroll chat to bottom
+                const chatWindow = document.getElementById('chat-window');
+                if (chatWindow) {
+                    chatWindow.scrollTop = chatWindow.scrollHeight;
+                }
             }
-            
-            // Re-attach events after rendering
-            attachHeaderEvents();
-            attachMainContentEvents();
         };
 
 
+        const handleChatSubmit = (e) => {
+            e.preventDefault();
+            const chatInput = document.getElementById('chat-input');
+            const userPrompt = chatInput.value.trim();
+
+            if (userPrompt === '' || appState.chatIsTyping) return;
+
+            // Add user message to history
+            appState.chatHistory.push({ role: 'user', parts: [{ text: userPrompt }] });
+            
+            // Start fetching AI response
+            fetchGeminiResponse(userPrompt);
+        };
+        
+        // --- 4.3. Event Attachments ---
         const attachMainContentEvents = () => {
             // Caregiver Dashboard Events
             const aiButton = document.getElementById('request-ai-button');
@@ -611,7 +828,7 @@
             if (noteTextarea && approveLogButton && rejectLogButton) {
                 // Enable/Disable log buttons based on text area content
                 const updateLogButtons = () => {
-                    const isDisabled = noteTextarea.value.trim().length === 0;
+                    const isDisabled = noteTextarea.value.trim().length === 0 || !appState.aiAdjustment;
                     approveLogButton.disabled = isDisabled;
                     rejectLogButton.disabled = isDisabled;
                 };
@@ -623,7 +840,13 @@
                 rejectLogButton.addEventListener('click', () => logTherapyAction(rejectLogButton.dataset.action));
             }
 
-            // Patient Goals Events
+            // Patient Chatbot Events
+            const chatForm = document.getElementById('chat-form');
+            if (chatForm) {
+                chatForm.addEventListener('submit', handleChatSubmit);
+            }
+
+            // Goal Save (simplified goal save logic, same as before)
             const saveGoalsButton = document.getElementById('save-goals-button');
             const goalsFocusTextarea = document.getElementById('goals-focus-textarea');
             const goalsNextStepsTextarea = document.getElementById('goals-next-steps-textarea');
@@ -638,24 +861,86 @@
                 goalsFocusTextarea.addEventListener('input', updateGoalData);
                 goalsNextStepsTextarea.addEventListener('input', updateGoalData);
                 saveGoalsButton.addEventListener('click', handleGoalSave);
-                
-                // Initialize button state
-                updateGoalData();
+                updateGoalData(); // Initialize button state
+            }
+            
+            // Re-render lucide icons after injecting HTML
+            lucide.createIcons();
+        };
+        
+        // --- 4.4. Goal and AI Request Handlers (same as before) ---
+        
+        const handleAIRequest = async () => {
+            appState.isLoading = true;
+            updateAIAdjustment(null); 
+            renderApp(); // Show loading state
+
+            try {
+                const adjustment = await simulateAIAdjustment(appState.metrics);
+                updateAIAdjustment(adjustment);
+            } catch (error) {
+                updateAIAdjustment({ predicao: 'Erro', ajusteTerapeutico: 'Falha de comunicação com o Motor de Terapia.', mensagemAI: 'Erro.' });
+            } finally {
+                appState.isLoading = false;
+                renderApp(); 
             }
         };
 
+        const handleGoalSave = async () => {
+            const goalsFocusTextarea = document.getElementById('goals-focus-textarea');
+            const goalsNextStepsTextarea = document.getElementById('goals-next-steps-textarea');
+            
+            const focus = goalsFocusTextarea.value;
+            const nextSteps = goalsNextStepsTextarea.value;
+            
+            appState.goals = { focus, nextSteps };
+            
+            // Use the actual Firebase UID for the path
+            const authUserId = appState.user?.firebaseUid;
+
+            if (!authUserId) {
+                 // Temporary status update without full re-render
+                 document.getElementById('save-goals-button').textContent = '⚠️ Erro de UID Firebase. Tente sair e entrar.';
+                 return;
+            }
+
+            const goalsDocRef = doc(appState.db, getPatientGoalsPath(authUserId));
+            
+            // Re-render with saving status
+            let tempStatus = 'A guardar...';
+            document.getElementById('save-goals-button').textContent = tempStatus;
+
+            try {
+                await setDoc(goalsDocRef, appState.goals, { merge: true });
+                tempStatus = '✅ Metas guardadas com sucesso! (Privado)';
+            } catch (error) {
+                console.error("Erro ao guardar metas:", error);
+                tempStatus = '❌ Erro ao guardar metas.';
+            }
+            
+            // Re-render with final status
+            document.getElementById('save-goals-button').textContent = tempStatus;
+            setTimeout(() => { 
+                if (document.getElementById('save-goals-button')) {
+                     document.getElementById('save-goals-button').textContent = 'Guardar as Minhas Metas';
+                }
+                attachHeaderEvents();
+                attachMainContentEvents();
+            }, 3000);
+        };
+
+
         // ===========================================================================
         // ⚙️ BLOCK 5: FIREBASE INITIALIZATION AND REAL-TIME DATA LOOP
-        // Sets up Firebase, handles auth flow, and manages Firestore listeners/writes.
         // ===========================================================================
 
-        const setupFirestoreListeners = () => {
-            if (!appState.db || !appState.authReady) return;
+        const setupPublicListeners = () => {
+            if (!appState.db) return;
 
             // --- 5.1. Public Metrics Listener (Read/Simulation) ---
             const metricsDocRef = doc(appState.db, PUBLIC_METRICS_PATH);
             
-            // 5.1.1. Setup real-time listener for public metrics
+            // 5.1.1. Setup real-time listener for public metrics (Monitoring)
             onSnapshot(metricsDocRef, (docSnap) => {
                 let data = { frequenciaCardiaca: 70.0, nivelEstresse: 3.5 };
                 if (docSnap.exists()) {
@@ -681,19 +966,26 @@
                     nivelEstresse: parseFloat((Math.random() * 6 + 1).toFixed(1)),
                     lastUpdate: Date.now()
                 };
-                setDoc(metricsDocRef, newMetrics, { merge: true }).catch(err => {
-                    console.error("Erro ao salvar métricas simuladas no Firestore:", err);
-                });
-            }, 5000);
-            
+                if (appState.db) {
+                    setDoc(metricsDocRef, newMetrics, { merge: true }).catch(err => {
+                        // Suppress console log on expected Firebase errors when running locally without full config
+                        if (err.code !== 'permission-denied') { 
+                            // console.error("Erro ao guardar métricas simuladas no Firestore:", err);
+                        }
+                    });
+                }
+            }, 5000); // Updates every 5 seconds for "real-time" feel
+        };
+        
+        const setupPrivateListeners = () => {
             // --- 5.2. Load Patient Goals (if user is a Patient) ---
-            if (appState.user && appState.user.role === 'Paciente') {
-                const goalsDocRef = doc(appState.db, getPatientGoalsPath(appState.user.userId));
+            if (appState.user && appState.user.role === 'Paciente' && appState.user.firebaseUid) {
+                // Use the authenticated UID to load goals securely
+                const goalsDocRef = doc(appState.db, getPatientGoalsPath(appState.user.firebaseUid));
                 getDoc(goalsDocRef).then(docSnap => {
                     if (docSnap.exists()) {
                         updateGoals(docSnap.data());
                     } else {
-                        // Default values if no data exists
                         updateGoals({ focus: 'Recuperação do sono e redução do estresse diário.', nextSteps: 'Completar 3 sessões de respiração por semana.' });
                     }
                 }).catch(error => console.error("Erro ao carregar metas do paciente:", error));
@@ -706,10 +998,9 @@
             appState.auth = getAuth(app);
             appState.db = getFirestore(app);
             
-            // Set log level for debugging Firebase operations
-            setLogLevel('debug'); 
+            setLogLevel('debug'); // Activate Firestore logging
 
-            // Handle Firebase Auth (Custom token or Anonymous sign-in)
+            // Handle Initial Firebase Auth
             try {
                 if (initialAuthToken) {
                     await signInWithCustomToken(appState.auth, initialAuthToken);
@@ -717,40 +1008,39 @@
                     await signInAnonymously(appState.auth);
                 }
             } catch (e) {
-                console.error("Erro na autenticação Firebase:", e);
+                console.error("Erro na autenticação Firebase (init):", e);
             }
 
             // Authentication state observer
             onAuthStateChanged(appState.auth, (currentUser) => {
-                if (currentUser) {
-                    console.log("Usuário autenticado:", currentUser.uid);
-                }
+                // This is the CRITICAL callback where the final UID is assigned.
                 appState.authReady = true;
-                
-                // Load user state from local storage (mock authentication)
-                const token = localStorage.getItem('token');
-                const encryptedName = localStorage.getItem('encryptedName');
-                const role = localStorage.getItem('role');
-                
-                if (token && encryptedName && role) {
-                    const name = mockDecrypt(encryptedName); 
-                    appState.user = { name, token, role, userId: localStorage.getItem('userId') };
-                    appState.currentScreen = role === 'Cuidador' ? 'Dashboard' : 'Progresso';
+
+                // 1. Setup Public Listener immediately if authenticated (for metrics, requires any auth)
+                if (currentUser) {
+                    setupPublicListeners();
                 }
 
-                // CRUCIAL FIX: Disable loading state once auth check is complete
-                appState.isLoading = false; 
-                
-                // Render the app and setup real-time data listeners
+                // 2. Setup Private Data and UI if mock user is also logged in
+                if (currentUser && appState.user) {
+                    // Update the real Firebase UID in the state
+                    appState.user.firebaseUid = currentUser.uid;
+                    // Now that we have the secure UID, we can set up private listeners
+                    setupPrivateListeners(); 
+                } 
+
+                // 3. Render the application based on the final state (logged in or not)
                 renderApp();
-                setupFirestoreListeners();
             });
         };
 
-        // Start application on window load
+        // Start application on window load (FIXED LOGIC)
         window.onload = () => {
-            appState.isLoading = true; // Set initial loading state
-            renderApp(); // Render the loading screen
+            // 1. Immediately check for a previously logged-in mock user
+            loadMockUserFromLocalStorage();
+            
+            // 2. Initialize Firebase services in the background. 
+            // The onAuthStateChanged listener will handle the final render when auth is confirmed.
             initializeAppAndAuth();
         };
 
