@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Protocolo 8R+ | Etapa 6: Expansão Funcional</title>
+    <title>Protocolo 8R+ | Etapa 7: Correção de Carregamento</title>
     <!-- Carregamento do Tailwind CSS para Estilização Rápida e Responsiva -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -18,6 +18,7 @@
     <div id="app" class="relative">
         <!-- O conteúdo será injetado aqui pelo JavaScript -->
     </div>
+
     <script type="module">
         // ===========================================================================
         // 🛠️ BLOCO 0: CONFIGURAÇÃO DO FIREBASE E FERRAMENTAS
@@ -42,7 +43,7 @@
             authReady: false,
             metrics: { frequenciaCardiaca: 0, nivelEstresse: 0 },
             aiAdjustment: null,
-            isLoading: false,
+            isLoading: false, // Inicia como false, mas a função de inicialização define como true
             goals: { focus: '', nextSteps: '' }
         };
 
@@ -159,11 +160,13 @@
             appContainer.innerHTML = html;
             
             // Re-anexa eventos após a renderização
-            if (appState.user) {
-                attachHeaderEvents();
-                attachMainContentEvents();
-            } else {
-                attachLoginEvents();
+            if (appState.isLoading === false) { // Verifica se não está carregando antes de anexar eventos de UI
+                if (appState.user) {
+                    attachHeaderEvents();
+                    attachMainContentEvents();
+                } else {
+                    attachLoginEvents();
+                }
             }
             
         };
@@ -279,14 +282,9 @@
                 appState.currentScreen = user.role === 'Cuidador' ? 'Dashboard' : 'Progresso';
                 renderApp();
             } else {
-                const errorElement = document.getElementById('login-error');
-                const errorMessage = 'Credenciais inválidas. Tente Médico/123 ou Paciente/123';
-                if (errorElement) {
-                    errorElement.innerHTML = errorMessage;
-                } else {
-                    document.getElementById('app').innerHTML = renderLoginScreen(errorMessage);
-                    attachLoginEvents();
-                }
+                // Re-renderiza a tela de login com erro
+                document.getElementById('app').innerHTML = renderLoginScreen('Credenciais inválidas. Tente Médico/123 ou Paciente/123') + renderFooter();
+                attachLoginEvents();
             }
         };
 
@@ -294,38 +292,13 @@
         // --- 3.3. Log de Ação Terapêutica (Sub-Componente) ---
         const renderTherapyNoteLog = () => {
             if (!appState.aiAdjustment) return '';
-            const status = document.querySelector('#log-status')?.textContent || '';
-            const note = document.querySelector('#note-textarea')?.value || '';
             
-            const action = async (actionType) => {
-                const noteValue = document.getElementById('note-textarea').value;
-                if (!appState.db || !appState.user || !appState.aiAdjustment || !noteValue) {
-                    document.getElementById('log-status').textContent = '⚠️ A nota é obrigatória para o registro.';
-                    return;
-                }
-                
-                document.getElementById('log-status').textContent = 'Registrando...';
-                const logData = {
-                    caregiverId: appState.user.userId,
-                    patientId: 'patient002', 
-                    actionType: actionType,
-                    aiRecommendation: appState.aiAdjustment.ajusteTerapeutico,
-                    caregiverNote: noteValue,
-                    metricsSnapshot: appState.metrics,
-                    timestamp: Date.now(),
-                };
-                
-                const logDocRef = doc(appState.db, getTherapyLogPath(appState.user.userId));
+            // Tenta obter o estado atual do DOM para evitar perda ao re-renderizar
+            const statusElement = document.getElementById('log-status');
+            const noteTextarea = document.getElementById('note-textarea');
+            const status = statusElement ? statusElement.textContent : '';
+            const note = noteTextarea ? noteTextarea.value : '';
 
-                try {
-                    await setDoc(logDocRef, { latestLog: logData }, { merge: true });
-                    document.getElementById('log-status').textContent = '✅ Ação e Nota Registradas com Sucesso! (Privado)';
-                    document.getElementById('note-textarea').value = ''; 
-                } catch (error) {
-                    console.error("Erro ao registrar Nota Terapêutica:", error);
-                    document.getElementById('log-status').textContent = '❌ Erro ao salvar log.';
-                }
-            };
             
             // Renderização do HTML do Log
             return `
@@ -344,7 +317,7 @@
                             id="approve-log-button"
                             data-action="Aprovado e Executado"
                             class="px-4 py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 transition disabled:opacity-50"
-                            ${!note ? 'disabled' : ''}
+                            ${note.trim().length === 0 ? 'disabled' : ''}
                         >
                             Aprovar & Registrar
                         </button>
@@ -352,7 +325,7 @@
                             id="reject-log-button"
                             data-action="Rejeitado/Ajuste Manual"
                             class="px-4 py-2 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 transition disabled:opacity-50"
-                            ${!note ? 'disabled' : ''}
+                            ${note.trim().length === 0 ? 'disabled' : ''}
                         >
                             Rejeitar & Registrar
                         </button>
@@ -420,6 +393,14 @@
         const renderGoalSettingScreen = (status = '') => {
             const goals = appState.goals;
             
+            // Tenta obter o estado atual do DOM
+            const goalsFocusElement = document.getElementById('goals-focus-textarea');
+            const goalsNextStepsElement = document.getElementById('goals-next-steps-textarea');
+            const currentFocus = goalsFocusElement ? goalsFocusElement.value : goals.focus;
+            const currentNextSteps = goalsNextStepsElement ? goalsNextStepsElement.value : goals.nextSteps;
+
+            const isDisabled = currentFocus.trim() === '' || currentNextSteps.trim() === '';
+
             return `
                 <div class="max-w-4xl mx-auto p-6 bg-gray-50 min-h-[90vh]">
                     <h2 class="text-4xl font-extrabold text-gray-900 mb-8 border-b pb-2">
@@ -435,19 +416,19 @@
                             id="goals-focus-textarea"
                             class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 mb-6"
                             rows="3"
-                        >${goals.focus}</textarea>
+                        >${currentFocus}</textarea>
 
                         <label class="block text-lg font-semibold text-gray-700 mb-2">Próximos Passos Terapêuticos</label>
                         <textarea
                             id="goals-next-steps-textarea"
                             class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 mb-6"
                             rows="3"
-                        >${goals.nextSteps}</textarea>
+                        >${currentNextSteps}</textarea>
                         
                         <button
                             id="save-goals-button"
                             class="w-full py-3 bg-teal-600 text-white font-bold text-lg rounded-lg card-shadow hover:bg-teal-700 transition transform hover:scale-[1.01] disabled:opacity-50"
-                            ${!goals.focus || !goals.nextSteps ? 'disabled' : ''}
+                            ${isDisabled ? 'disabled' : ''}
                         >
                             ${status || 'Salvar Minhas Metas'}
                         </button>
@@ -500,7 +481,7 @@
         
         const renderFooter = () => `
             <footer class="p-4 text-center text-xs text-gray-500 border-t mt-4">
-                Sistema Protocolo 8R+ Integrado V6. **Expansão Funcional Ativada:** Log de Ação Terapêutica (Proteção) e Definição de Metas (Co-criação).
+                Sistema Protocolo 8R+ Integrado V7. **Correção de Estabilidade de Carregamento.**
             </footer>
         `;
         
@@ -548,26 +529,61 @@
             }
         };
         
+        const logTherapyAction = async (actionType) => {
+            const noteValue = document.getElementById('note-textarea').value;
+            if (!appState.db || !appState.user || !appState.aiAdjustment || noteValue.trim().length === 0) {
+                document.getElementById('log-status').textContent = '⚠️ A nota é obrigatória para o registro.';
+                return;
+            }
+            
+            document.getElementById('log-status').textContent = 'Registrando...';
+            const logData = {
+                caregiverId: appState.user.userId,
+                patientId: 'patient002', 
+                actionType: actionType,
+                aiRecommendation: appState.aiAdjustment.ajusteTerapeutico,
+                caregiverNote: noteValue,
+                metricsSnapshot: appState.metrics,
+                timestamp: Date.now(),
+            };
+            
+            const logDocRef = doc(appState.db, getTherapyLogPath(appState.user.userId));
+
+            try {
+                await setDoc(logDocRef, { latestLog: logData }, { merge: true });
+                document.getElementById('log-status').textContent = '✅ Ação e Nota Registradas com Sucesso! (Privado)';
+                document.getElementById('note-textarea').value = ''; 
+                // Força a UI a atualizar o estado dos botões de log
+                renderApp(); 
+            } catch (error) {
+                console.error("Erro ao registrar Nota Terapêutica:", error);
+                document.getElementById('log-status').textContent = '❌ Erro ao salvar log.';
+            }
+        };
+
         const handleGoalSave = async () => {
-            const focus = document.getElementById('goals-focus-textarea').value;
-            const nextSteps = document.getElementById('goals-next-steps-textarea').value;
+            const goalsFocusTextarea = document.getElementById('goals-focus-textarea');
+            const goalsNextStepsTextarea = document.getElementById('goals-next-steps-textarea');
+            
+            const focus = goalsFocusTextarea.value;
+            const nextSteps = goalsNextStepsTextarea.value;
             
             appState.goals = { focus, nextSteps };
             
             const goalsDocRef = doc(appState.db, getPatientGoalsPath(appState.user.userId));
-            const saveButton = document.getElementById('save-goals-button');
             
-            // Rerender com status de salvando
+            // Re-renderiza com status de salvando
             document.getElementById('app').innerHTML = renderHeader() + renderMainContent({ status: 'Salvando...' }) + renderFooter();
+            attachHeaderEvents();
             
             try {
                 await setDoc(goalsDocRef, appState.goals, { merge: true });
-                // Rerender com status de sucesso
-                document.getElementById('app').innerHTML = renderHeader() + renderMainContent({ status: '✅ Metas salvas com sucesso! (Privado)' }) + renderFooter();
+                // Re-renderiza com status de sucesso
+                document.getElementById('app').innerHTML = renderHeader() + renderGoalSettingScreen('✅ Metas salvas com sucesso! (Privado)') + renderFooter();
             } catch (error) {
                 console.error("Erro ao salvar metas:", error);
-                // Rerender com status de erro
-                document.getElementById('app').innerHTML = renderHeader() + renderMainContent({ status: '❌ Erro ao salvar metas.' }) + renderFooter();
+                // Re-renderiza com status de erro
+                document.getElementById('app').innerHTML = renderHeader() + renderGoalSettingScreen('❌ Erro ao salvar metas.') + renderFooter();
             }
             
             // Re-anexar eventos após a renderização
@@ -589,22 +605,17 @@
 
             if (noteTextarea && approveLogButton && rejectLogButton) {
                 // Habilita/Desabilita botões ao digitar
-                noteTextarea.addEventListener('input', () => {
+                const updateLogButtons = () => {
                     const isDisabled = noteTextarea.value.trim().length === 0;
                     approveLogButton.disabled = isDisabled;
                     rejectLogButton.disabled = isDisabled;
-                });
+                };
+                noteTextarea.addEventListener('input', updateLogButtons);
+                updateLogButtons(); // Chama na anexação
                 
                 // Anexa eventos de log
-                approveLogButton.addEventListener('click', () => {
-                    // O valor da nota é lido dentro da função de ação no renderTherapyNoteLog
-                    const action = approveLogButton.dataset.action;
-                    action(action); 
-                });
-                rejectLogButton.addEventListener('click', () => {
-                    const action = rejectLogButton.dataset.action;
-                    action(action); 
-                });
+                approveLogButton.addEventListener('click', () => logTherapyAction(approveLogButton.dataset.action));
+                rejectLogButton.addEventListener('click', () => logTherapyAction(rejectLogButton.dataset.action));
             }
 
             // Metas do Paciente
@@ -616,7 +627,6 @@
                 const updateGoalData = () => {
                     appState.goals.focus = goalsFocusTextarea.value;
                     appState.goals.nextSteps = goalsNextStepsTextarea.value;
-                    // Força a re-verificação para desabilitar/habilitar
                     saveGoalsButton.disabled = goalsFocusTextarea.value.trim() === '' || goalsNextStepsTextarea.value.trim() === '';
                 };
 
@@ -647,6 +657,10 @@
                 } else {
                     setDoc(metricsDocRef, data, { merge: true });
                 }
+                // Garante que os valores são floats
+                data.frequenciaCardiaca = parseFloat(data.frequenciaCardiaca.toFixed(1));
+                data.nivelEstresse = parseFloat(data.nivelEstresse.toFixed(1));
+
                 updateMetrics(data);
             }, (error) => {
                 console.error("Erro ao escutar métricas do Firestore:", error);
@@ -715,6 +729,9 @@
                     appState.user = { name, token, role, userId: localStorage.getItem('userId') };
                     appState.currentScreen = role === 'Cuidador' ? 'Dashboard' : 'Progresso';
                 }
+
+                // FIX CRUCIAL: Desativa o estado de carregamento após a verificação de autenticação
+                appState.isLoading = false; 
                 
                 // Renderiza após a autenticação e carregamento do estado local
                 renderApp();
@@ -724,8 +741,8 @@
 
         // Inicia a aplicação no carregamento da janela
         window.onload = () => {
-            appState.isLoading = true;
-            renderApp();
+            appState.isLoading = true; // Define o estado inicial de carregamento
+            renderApp(); // Renderiza o ecrã de carregamento
             initializeAppAndAuth();
         };
 
