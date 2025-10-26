@@ -207,6 +207,9 @@
             } else if (appState.user) {
                 // If user is logged in, show the main application UI
                 html = renderHeader() + renderMainContent();
+            } else {
+                // Fallback render if something failed critically but authReady is true
+                html = renderLoadingScreen("ERRO NA LIGAÇÃO: Recarregue a página.");
             }
             
             // Add fixed footer
@@ -994,24 +997,31 @@
 
 
         const initializeAppAndAuth = async () => {
-            const app = initializeApp(firebaseConfig);
-            appState.auth = getAuth(app);
-            appState.db = getFirestore(app);
             
-            setLogLevel('debug'); // Activate Firestore logging
-
-            // Handle Initial Firebase Auth
             try {
+                // Tentar inicializar o Firebase. Se a configuração estiver vazia, irá falhar aqui.
+                const app = initializeApp(firebaseConfig);
+                appState.auth = getAuth(app);
+                appState.db = getFirestore(app);
+                
+                setLogLevel('debug'); // Activate Firestore logging
+
+                // Handle Initial Firebase Auth
                 if (initialAuthToken) {
                     await signInWithCustomToken(appState.auth, initialAuthToken);
                 } else {
                     await signInAnonymously(appState.auth);
                 }
             } catch (e) {
-                console.error("Erro na autenticação Firebase (init):", e);
+                console.error("ERRO CRÍTICO na inicialização do Firebase:", e);
+                // Se a inicialização falhar (ex: config inválida), forçamos a renderização
+                // para evitar tela em branco, exibindo o ecrã de login ou erro.
+                appState.authReady = true;
+                renderApp(); 
+                return;
             }
 
-            // Authentication state observer
+            // Authentication state observer - This ensures the final UI state is set.
             onAuthStateChanged(appState.auth, (currentUser) => {
                 // This is the CRITICAL callback where the final UID is assigned.
                 appState.authReady = true;
