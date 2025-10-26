@@ -1,664 +1,735 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="pt">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-// -*- coding: utf-8 -*-
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-
-// ===========================================================================
-// 🛠️ BLOCO 0: CONFIGURAÇÃO DO FIREBASE E FERRAMENTAS
-// ===========================================================================
-
-// Importações Firebase - CORRIGIDAS para o formato React/NPM
-// O ambiente Canvas resolve estas importações internamente.
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-// Importação de setLogLevel adicionada para diagnóstico de conexão
-import { getFirestore, doc, setDoc, onSnapshot, getDoc, setLogLevel } from 'firebase/firestore'; 
-
-// Variáveis globais (disponíveis no ambiente Canvas)
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-// --- Constantes de Caminho do Firestore ---
-// Dados Públicos/Compartilhados:
-const PUBLIC_METRICS_PATH = `/artifacts/${appId}/public/data/health_metrics/patient_001`;
-// Dados Privados (Log de Ação do Cuidador e Metas do Paciente) - Usamos patient_002 como o ID do Paciente de Teste
-const getTherapyLogPath = (caregiverUserId) => `/artifacts/${appId}/users/${caregiverUserId}/therapy_notes/patient_002_log`;
-const getPatientGoalsPath = (patientUserId) => `/artifacts/${appId}/users/${patientUserId}/goals/current_focus`;
-
-// ===========================================================================
-// 🌟 BLOCO 1: MICROSSERVIÇO DE PROTEÇÃO E COMPAIXÃO (Mocks de Back-end)
-// ===========================================================================
-
-// --- 1.1. MOCK DE CRIPTOGRAFIA AES-256 (Pilar de Proteção) ---
-const mockEncrypt = (data) => {
-  if (!data || typeof data !== 'string') return '';
-  const encrypted = data.split('').map(char => String.fromCharCode(char.charCodeAt(0) ^ 123)).join('');
-  return btoa(encrypted); 
-};
-
-const mockDecrypt = (encrypted) => {
-  if (!encrypted) return '';
-  try {
-    const decoded = atob(encrypted);
-    const decrypted = decoded.split('').map(char => String.fromCharCode(char.charCodeAt(0) ^ 123)).join('');
-    return decrypted;
-  } catch (e) {
-    return 'ERRO: Falha ao descriptografar dado.';
-  }
-};
-
-// --- 1.2. MOCK DE AUTENTICAÇÃO JWT (Pilar de Proteção) ---
-const mockAuthLogin = (username, password) => {
-  if (username === 'medico' && password === '123') {
-    const encryptedName = mockEncrypt("Dr. João Custódio (Cuidador)");
-    return { token: 'jwt.medic.token', userId: 'medic001', name: "Dr. João Custódio", role: 'Cuidador', encryptedName };
-  }
-  if (username === 'paciente' && password === '123') {
-    const encryptedName = mockEncrypt("Maria da Silva (Paciente)");
-    return { token: 'jwt.patient.token', userId: 'patient002', name: "Maria da Silva", role: 'Paciente', encryptedName };
-  }
-  return null;
-};
-
-// --- 1.3. MOCK DO MOTOR DE TERAPIA DE IA (Pilar de Compaixão) ---
-const simulateAIAdjustment = async (metrics) => {
-  const { frequenciaCardiaca, nivelEstresse } = metrics;
-  
-  const predicao = nivelEstresse > 5.5 ? 'Risco Elevado' : 'Seguro/Estável';
-  let ajusteRecomendado = 'Manter a terapia atual (Protocolo 8R+).';
-
-  if (predicao === 'Risco Elevado') {
-    if (nivelEstresse > 7.0) {
-      ajusteRecomendado = 'PAUSA IMEDIATA. Recomendar biofeedback neuroemocional (Áudio 432Hz). Ativar dose de resgate de IL-15 (Imunológico).';
-    } else if (frequenciaCardiaca > 90) {
-      ajusteRecomendado = 'Ajuste de Foco. Reduzir a dificuldade da sessão cognitiva em 25%. Priorizar hidratação e Microbiota (Curcumina).';
-    }
-  } else {
-    if (nivelEstresse < 3.0 && frequenciaCardiaca < 75) {
-      ajusteRecomendado = 'Avanço de Fase. O paciente responde bem. Sugerir introdução da próxima etapa Genética (CRISPR/Cas9) e aumento da complexidade da Imunoterapia.';
-    }
-  }
-
-  return new Promise(resolve => setTimeout(() => resolve({ predicao, ajusteTerapeutico: ajusteRecomendado, mensagemAI: 'Análise de Risco Completa' }), 1000));
-};
-
-// ===========================================================================
-// 🖥️ BLOCO 2: COMPONENTES DE INTERFACE E VISTAS
-// ===========================================================================
-
-// --- Header ---
-const Header = ({ onNavigate, currentScreen, user, handleLogout }) => {
-  const isCaregiver = user?.role === 'Cuidador';
-  // Adiciona a nova tela de Metas para o paciente
-  const navItems = isCaregiver 
-    ? ['Dashboard', 'Monitoramento', 'Relatórios', 'Perfil']
-    : ['Progresso', 'Metas', 'Respiração', 'Perfil'];
-
-  return (
-    <header className="bg-gradient-to-r from-blue-900 to-indigo-800 text-white shadow-xl p-4 sticky top-0 z-10">
-      <div className="max-w-7xl mx-auto flex justify-between items-center">
-        <h1 className="text-2xl font-extrabold tracking-tight cursor-pointer" onClick={() => onNavigate(isCaregiver ? 'Dashboard' : 'Progresso')}>
-          Protocolo 8R+
-        </h1>
-        <nav className="flex space-x-4">
-          {navItems.map(screen => (
-            <button
-              key={screen}
-              onClick={() => onNavigate(screen)}
-              className={`px-3 py-1 rounded-full text-sm font-medium transition-all ${
-                currentScreen === screen ? 'bg-indigo-400 shadow-md transform scale-105' : 'hover:bg-indigo-600'
-              }`}
-            >
-              {screen}
-            </button>
-          ))}
-        </nav>
-        <div className="flex items-center space-x-4">
-          <span className="text-sm font-light hidden sm:inline">{user?.role === 'Cuidador' ? 'MÉDICO' : 'PACIENTE'}: {user?.name.split(' ')[0]}</span>
-          <button
-            onClick={handleLogout}
-            className="px-3 py-1 rounded-full text-sm font-medium bg-red-500 hover:bg-red-600 transition-all shadow-md"
-          >
-            Sair
-          </button>
-        </div>
-      </div>
-    </header>
-  );
-};
-
-// --- Ecrã de Login (Não Alterado) ---
-const LoginScreen = ({ onLogin }) => {
-  const [username, setUsername] = useState('medico');
-  const [password, setPassword] = useState('123');
-  const [error, setError] = useState('');
-
-  const handleLogin = () => {
-    setError('');
-    const user = mockAuthLogin(username, password);
-    
-    if (user) {
-      localStorage.setItem('token', user.token);
-      localStorage.setItem('userId', user.userId);
-      localStorage.setItem('encryptedName', user.encryptedName);
-      localStorage.setItem('role', user.role);
-      onLogin(user);
-    } else {
-      setError('Credenciais inválidas. Tente Médico/123 ou Paciente/123');
-    }
-  };
-
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
-      <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-md border-t-8 border-indigo-600">
-        <h2 className="text-3xl font-bold text-center text-gray-900 mb-6">Acesso ao Protocolo 8R+</h2>
-        {error && <p className="text-red-600 bg-red-100 p-2 rounded-lg mb-4 text-sm text-center">{error}</p>}
-        
-        <label className="block text-sm font-medium text-gray-700 mb-1">Nome de Usuário</label>
-        <input
-          type="text"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          className="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 mb-4"
-          placeholder="medico ou paciente"
-        />
-
-        <label className="block text-sm font-medium text-gray-700 mb-1">Senha</label>
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 mb-6"
-          placeholder="••••••••"
-        />
-
-        <button
-          onClick={handleLogin}
-          className="w-full bg-indigo-600 text-white py-3 rounded-lg font-semibold hover:bg-indigo-700 transition duration-150 shadow-lg transform hover:scale-[1.01]"
-        >
-          Entrar (Simulação JWT)
-        </button>
-        <p className="mt-4 text-xs text-center text-gray-500">
-          🔓 **CONTAS TESTE:** medico/123 (Cuidador) | paciente/123 (Paciente)
-        </p>
-      </div>
+    <title>Protocolo 8R+ | Etapa 6: Expansão Funcional</title>
+    <!-- Carregamento do Tailwind CSS para Estilização Rápida e Responsiva -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Define a fonte Inter como padrão */
+        body { font-family: 'Inter', sans-serif; }
+        /* Estilos para botões e inputs focados */
+        input:focus, textarea:focus { outline: none; box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.4); }
+        .card-shadow { box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div id="app" class="relative">
+        <!-- O conteúdo será injetado aqui pelo JavaScript -->
     </div>
-  );
-};
 
-
-// --- Log de Ação Terapêutica (Novo Componente) ---
-const TherapyNoteLog = ({ db, user, aiAdjustment, currentMetrics }) => {
-  const [note, setNote] = useState('');
-  const [logStatus, setLogStatus] = useState(null);
-
-  const logTherapyAction = useCallback(async (action) => {
-    if (!db || !user || !aiAdjustment || !note) {
-      setLogStatus('⚠️ A nota é obrigatória para o registro.');
-      return;
-    }
-    
-    setLogStatus('Registrando...');
-    const logData = {
-      caregiverId: user.userId,
-      patientId: 'patient002', // Hardcoded para o nosso paciente de teste
-      actionType: action,
-      aiRecommendation: aiAdjustment.ajusteTerapeutico,
-      caregiverNote: note,
-      metricsSnapshot: currentMetrics,
-      timestamp: Date.now(),
-    };
-    
-    // Caminho privado do Cuidador
-    const logDocRef = doc(db, getTherapyLogPath(user.userId));
-
-    try {
-        await setDoc(logDocRef, { 
-            latestLog: logData,
-        }, { merge: true });
+    <script type="module">
+        // ===========================================================================
+        // 🛠️ BLOCO 0: CONFIGURAÇÃO DO FIREBASE E FERRAMENTAS
+        // ===========================================================================
         
-        setLogStatus('✅ Ação e Nota Registradas com Sucesso! (Privado)');
-        setNote('');
-    } catch (error) {
-        console.error("Erro ao registrar Nota Terapêutica:", error);
-        setLogStatus('❌ Erro ao salvar log.');
-    }
-  }, [db, user, aiAdjustment, note, currentMetrics]);
-  
-  if (!aiAdjustment) return null;
+        // Importações Firebase (Versão CDN)
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, getDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-  return (
-    <div className="bg-gray-50 p-4 rounded-xl shadow-inner border border-gray-200 mt-4">
-      <h4 className="text-lg font-bold text-gray-800 border-b pb-2 mb-3">
-        Registro de Ação Terapêutica (Pilar da Proteção - Log de Governança)
-      </h4>
-      <textarea
-        value={note}
-        onChange={(e) => setNote(e.target.value)}
-        placeholder="Adicione suas notas sobre a decisão (Ex: Aprovado, mas ajustei a dose...) (Obrigatório)"
-        className="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-sm"
-        rows="3"
-      />
-      <div className="mt-3 flex justify-end space-x-3">
-        <button
-          onClick={() => logTherapyAction('Aprovado e Executado')}
-          disabled={!note || logStatus === 'Registrando...'}
-          className="px-4 py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 transition disabled:opacity-50"
-        >
-          Aprovar & Registrar
-        </button>
-        <button
-          onClick={() => logTherapyAction('Rejeitado/Ajuste Manual')}
-          disabled={!note || logStatus === 'Registrando...'}
-          className="px-4 py-2 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 transition disabled:opacity-50"
-        >
-          Rejeitar & Registrar
-        </button>
-      </div>
-      {logStatus && <p className="mt-3 text-sm text-center font-medium text-gray-700">{logStatus}</p>}
-    </div>
-  );
-};
+        // Variáveis globais (disponíveis no ambiente Canvas)
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // Estado Global da Aplicação
+        let appState = {
+            user: null,
+            currentScreen: 'Dashboard',
+            db: null,
+            auth: null,
+            authReady: false,
+            metrics: { frequenciaCardiaca: 0, nivelEstresse: 0 },
+            aiAdjustment: null,
+            isLoading: false,
+            goals: { focus: '', nextSteps: '' }
+        };
 
+        // --- Constantes de Caminho do Firestore ---
+        const PUBLIC_METRICS_PATH = `/artifacts/${appId}/public/data/health_metrics/patient_001`;
+        const getTherapyLogPath = (caregiverUserId) => `/artifacts/${appId}/users/${caregiverUserId}/therapy_notes/patient_002_log`;
+        const getPatientGoalsPath = (patientUserId) => `/artifacts/${appId}/users/${patientUserId}/goals/current_focus`;
 
-// --- Dashboard do Cuidador (Atualizado com Log) ---
-const CaregiverDashboard = ({ user, db }) => {
-  const [metrics, setMetrics] = useState({ frequenciaCardiaca: 0, nivelEstresse: 0 });
-  const [aiAdjustment, setAiAdjustment] = useState(null);
-  const [loading, setLoading] = useState(false);
-  
-  // 1. ONSNAPSHOT: Escutar mudanças no Firestore em tempo real
-  useEffect(() => {
-    if (!db) return;
+        // ===========================================================================
+        // 🌟 BLOCO 1: MICROSSERVIÇO DE PROTEÇÃO E COMPAIXÃO (Mocks de Back-end)
+        // ===========================================================================
 
-    const docRef = doc(db, PUBLIC_METRICS_PATH);
-    const unsubscribe = onSnapshot(docRef, (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        setMetrics({
-          frequenciaCardiaca: data.frequenciaCardiaca || 0,
-          nivelEstresse: data.nivelEstresse || 0
-        });
-      } else {
-        setMetrics({ frequenciaCardiaca: 70, nivelEstresse: 3.5 });
-        setDoc(docRef, { frequenciaCardiaca: 70, nivelEstresse: 3.5, lastUpdate: Date.now() }, { merge: true });
-      }
-    }, (error) => {
-      console.error("Erro ao escutar métricas do Firestore:", error);
-    });
+        // --- 1.1. MOCK DE CRIPTOGRAFIA AES-256 (Pilar de Proteção) ---
+        const mockEncrypt = (data) => {
+            if (!data || typeof data !== 'string') return '';
+            const encrypted = data.split('').map(char => String.fromCharCode(char.charCodeAt(0) ^ 123)).join('');
+            return btoa(encrypted); 
+        };
 
-    return () => unsubscribe();
-  }, [db]);
-  
-  // 2. SIMULAÇÃO: Mantém a simulação, mas agora ESCREVE no Firestore
-  useEffect(() => {
-    if (!db) return;
+        const mockDecrypt = (encrypted) => {
+            if (!encrypted) return '';
+            try {
+                const decoded = atob(encrypted);
+                const decrypted = decoded.split('').map(char => String.fromCharCode(char.charCodeAt(0) ^ 123)).join('');
+                return decrypted;
+            } catch (e) {
+                return 'ERRO: Falha ao descriptografar dado.';
+            }
+        };
 
-    const interval = setInterval(() => {
-      const newMetrics = {
-        frequenciaCardiaca: parseFloat((Math.random() * (95 - 70) + 70).toFixed(1)),
-        nivelEstresse: parseFloat((Math.random() * 6 + 1).toFixed(1)),
-        lastUpdate: Date.now()
-      };
-      
-      const docRef = doc(db, PUBLIC_METRICS_PATH);
-      setDoc(docRef, newMetrics, { merge: true }).catch(err => {
-        console.error("Erro ao salvar métricas simuladas no Firestore:", err);
-      });
-      
-    }, 5000); 
+        // --- 1.2. MOCK DE AUTENTICAÇÃO JWT (Pilar de Proteção) ---
+        const mockAuthLogin = (username, password) => {
+            if (username === 'medico' && password === '123') {
+                const encryptedName = mockEncrypt("Dr. João Custódio (Cuidador)");
+                return { token: 'jwt.medic.token', userId: 'medic001', name: "Dr. João Custódio", role: 'Cuidador', encryptedName };
+            }
+            if (username === 'paciente' && password === '123') {
+                const encryptedName = mockEncrypt("Maria da Silva (Paciente)");
+                return { token: 'jwt.patient.token', userId: 'patient002', name: "Maria da Silva", role: 'Paciente', encryptedName };
+            }
+            return null;
+        };
 
-    return () => clearInterval(interval);
-  }, [db]);
+        // --- 1.3. MOCK DO MOTOR DE TERAPIA DE IA (Pilar de Compaixão) ---
+        const simulateAIAdjustment = async (metrics) => {
+            const { frequenciaCardiaca, nivelEstresse } = metrics;
+            
+            const predicao = nivelEstresse > 5.5 ? 'Risco Elevado' : 'Seguro/Estável';
+            let ajusteRecomendado = 'Manter a terapia atual (Protocolo 8R+).';
 
+            if (predicao === 'Risco Elevado') {
+                if (nivelEstresse > 7.0) {
+                    ajusteRecomendado = 'PAUSA IMEDIATA. Recomendar biofeedback neuroemocional (Áudio 432Hz). Ativar dose de resgate de IL-15 (Imunológico).';
+                } else if (frequenciaCardiaca > 90) {
+                    ajusteRecomendado = 'Ajuste de Foco. Reduzir a dificuldade da sessão cognitiva em 25%. Priorizar hidratação e Microbiota (Curcumina).';
+                }
+            } else {
+                if (nivelEstresse < 3.0 && frequenciaCardiaca < 75) {
+                    ajusteRecomendado = 'Avanço de Fase. O paciente responde bem. Sugerir introdução da próxima etapa Genética (CRISPR/Cas9) e aumento da complexidade da Imunoterapia.';
+                }
+            }
 
-  const handleAIRequest = async () => {
-    setLoading(true);
-    setAiAdjustment(null);
-    try {
-      const adjustment = await simulateAIAdjustment(metrics);
-      setAiAdjustment(adjustment);
-    } catch (error) {
-      setAiAdjustment({ predicao: 'Erro', ajusteTerapeutico: 'Falha de comunicação com o Motor de Terapia.', mensagemAI: 'Erro.' });
-    } finally {
-      setLoading(false);
-    }
-  };
+            return new Promise(resolve => setTimeout(() => resolve({ predicao, ajusteTerapeutico: ajusteRecomendado, mensagemAI: 'Análise de Risco Completa' }), 1000));
+        };
+        
+        // ===========================================================================
+        // 🚀 BLOCO 2: GESTÃO DO ESTADO E RENDERIZAÇÃO
+        // ===========================================================================
 
-  const getStatusColor = (predicao) => {
-    if (predicao.includes('Risco')) return 'bg-red-500 border-red-500';
-    if (predicao.includes('Seguro')) return 'bg-green-500 border-green-500';
-    return 'bg-yellow-500 border-yellow-500';
-  };
+        const navigate = (screen) => {
+            appState.currentScreen = screen;
+            renderApp();
+        };
 
-  return (
-    <div className="max-w-7xl mx-auto p-6 bg-gray-50 min-h-[90vh]">
-      <h2 className="text-4xl font-extrabold text-gray-900 mb-6 border-b pb-2">
-        Dashboard do Cuidador | Visão Integrada (IA)
-      </h2>
-      
-      <div className="grid md:grid-cols-3 gap-6 mb-8">
-        {/* Bloco de Monitoramento */}
-        <div className="bg-white p-6 rounded-xl shadow-lg border-l-4 border-indigo-500">
-          <h3 className="text-xl font-semibold text-gray-700 mb-4 flex items-center"><span className="text-indigo-500 mr-2">❤️</span> Monitoramento Real-Time (Firestore)</h3>
-          <p className="text-4xl font-bold text-gray-800">{metrics.frequenciaCardiaca} <span className="text-lg font-normal">BPM</span></p>
-          <p className="text-4xl font-bold text-gray-800 mt-2">{metrics.nivelEstresse} <span className="text-lg font-normal">Estresse (0-10)</span></p>
-          <p className="text-xs text-green-500 mt-3">✅ Dados persistentes e em tempo real.</p>
-        </div>
+        const handleLogout = () => {
+            localStorage.clear();
+            appState.user = null;
+            appState.aiAdjustment = null;
+            appState.currentScreen = 'Dashboard';
+            renderApp();
+        };
 
-        {/* Bloco da IA e Log de Ação */}
-        <div className="md:col-span-2 bg-white p-6 rounded-xl shadow-2xl border-l-4 border-purple-600">
-          <h3 className="text-xl font-semibold text-purple-700 mb-4 flex items-center"><span className="text-purple-600 mr-2">🧠</span> Motor de Terapia (IA Adaptativa)</h3>
-          
-          <button
-            onClick={handleAIRequest}
-            disabled={loading}
-            className="w-full bg-purple-600 text-white py-2 rounded-lg font-semibold hover:bg-purple-700 transition duration-150 disabled:opacity-50 flex justify-center items-center"
-          >
-            {loading ? 'Analisando dados...' : 'Solicitar Ajuste Terapêutico da IA'}
-          </button>
+        const updateMetrics = (newMetrics) => {
+            appState.metrics = newMetrics;
+            renderApp();
+        };
 
-          {aiAdjustment && (
-            <div className={`mt-4 p-4 rounded-xl shadow-inner bg-opacity-10 border-l-4 ${getStatusColor(aiAdjustment.predicao)}`}>
-              <p className="font-bold text-gray-800">Previsão da IA: <span className={`uppercase font-extrabold text-white px-2 py-0.5 rounded-full text-sm ${getStatusColor(aiAdjustment.predicao).replace('border-', 'bg-')}`}>{aiAdjustment.predicao}</span></p>
-              <p className="mt-2 text-gray-700 text-lg font-medium">{aiAdjustment.ajusteTerapeutico}</p>
+        const updateAIAdjustment = (adjustment) => {
+            appState.aiAdjustment = adjustment;
+            renderApp();
+        };
+
+        const updateGoals = (newGoals) => {
+            appState.goals = newGoals;
+            renderApp();
+        };
+
+        // Função principal que redesenha toda a aplicação
+        const renderApp = () => {
+            const appContainer = document.getElementById('app');
+            let html = '';
+
+            if (appState.isLoading) {
+                html = renderLoadingScreen();
+            } else if (appState.user) {
+                html = renderHeader() + renderMainContent();
+            } else {
+                html = renderLoginScreen();
+            }
+            
+            // Adiciona o rodapé fixo
+            html += renderFooter();
+            
+            appContainer.innerHTML = html;
+            
+            // Re-anexa eventos após a renderização
+            if (appState.user) {
+                attachHeaderEvents();
+                attachMainContentEvents();
+            } else {
+                attachLoginEvents();
+            }
+            
+        };
+        
+        // ===========================================================================
+        // 🖥️ BLOCO 3: RENDERING DE COMPONENTES
+        // ===========================================================================
+
+        const getStatusColor = (predicao) => {
+            if (predicao.includes('Risco')) return 'bg-red-500 border-red-500';
+            if (predicao.includes('Seguro')) return 'bg-green-500 border-green-500';
+            return 'bg-yellow-500 border-yellow-500';
+        };
+        
+        const renderLoadingScreen = () => `
+            <div class="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+                <p class="text-xl font-medium text-indigo-600">Conectando ao Núcleo de Dados...</p>
             </div>
-          )}
-          
-          {/* NOVO: Componente de Log */}
-          {user && <TherapyNoteLog db={db} user={user} aiAdjustment={aiAdjustment} currentMetrics={metrics} />}
-        </div>
-      </div>
-    </div>
-  );
-};
+        `;
 
-// --- Definição de Foco e Metas (Novo Ecrã do Paciente) ---
-const GoalSettingScreen = ({ user, db }) => {
-  const [goals, setGoals] = useState({ focus: '', nextSteps: '' });
-  const [loading, setLoading] = useState(true);
-  const [saveStatus, setSaveStatus] = useState('');
-  
-  // Garante que o docRef só é criado se db e user.userId existirem
-  const goalsDocRef = useMemo(() => (db && user.userId) ? doc(db, getPatientGoalsPath(user.userId)) : null, [db, user.userId]);
+        // --- 3.1. Header ---
+        const renderHeader = () => {
+            const isCaregiver = appState.user?.role === 'Cuidador';
+            const navItems = isCaregiver 
+                ? ['Dashboard', 'Monitoramento', 'Relatórios', 'Perfil']
+                : ['Progresso', 'Metas', 'Respiração', 'Perfil'];
+            
+            const navButtons = navItems.map(screen => `
+                <button
+                    data-screen="${screen}"
+                    class="nav-button px-3 py-1 rounded-full text-sm font-medium transition-all ${
+                        appState.currentScreen === screen ? 'bg-indigo-400 shadow-md transform scale-105' : 'hover:bg-indigo-600'
+                    }"
+                >
+                    ${screen}
+                </button>
+            `).join('');
 
-  // Carregar metas existentes (ONCE)
-  useEffect(() => {
-    const fetchGoals = async () => {
-      if (!goalsDocRef) return;
-      try {
-        const docSnap = await getDoc(goalsDocRef);
-        if (docSnap.exists()) {
-          setGoals(docSnap.data());
-        } else {
-          setGoals({ focus: 'Recuperação do sono e redução do estresse diário.', nextSteps: 'Completar 3 sessões de respiração por semana.' });
-        }
-      } catch (error) {
-        console.error("Erro ao carregar metas:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchGoals();
-  }, [goalsDocRef]);
+            return `
+                <header class="bg-gradient-to-r from-blue-900 to-indigo-800 text-white card-shadow p-4 sticky top-0 z-10">
+                    <div class="max-w-7xl mx-auto flex justify-between items-center">
+                        <h1 class="text-2xl font-extrabold tracking-tight cursor-pointer" id="logo-nav">
+                            Protocolo 8R+
+                        </h1>
+                        <nav class="flex space-x-4">
+                            ${navButtons}
+                        </nav>
+                        <div class="flex items-center space-x-4">
+                            <span class="text-sm font-light hidden sm:inline">${appState.user.role === 'Cuidador' ? 'MÉDICO' : 'PACIENTE'}: ${appState.user.name.split(' ')[0]}</span>
+                            <button
+                                id="logout-button"
+                                class="px-3 py-1 rounded-full text-sm font-medium bg-red-500 hover:bg-red-600 transition-all shadow-md"
+                            >
+                                Sair
+                            </button>
+                        </div>
+                    </div>
+                </header>
+            `;
+        };
 
-  const handleSaveGoals = async () => {
-    if (!goalsDocRef) return;
-    setSaveStatus('Salvando...');
-    try {
-      await setDoc(goalsDocRef, goals, { merge: true });
-      setSaveStatus('✅ Metas salvas com sucesso! (Privado)');
-    } catch (error) {
-      console.error("Erro ao salvar metas:", error);
-      setSaveStatus('❌ Erro ao salvar metas.');
-    } finally {
-      setTimeout(() => setSaveStatus(''), 3000);
-    }
-  };
+        const attachHeaderEvents = () => {
+            document.getElementById('logout-button')?.addEventListener('click', handleLogout);
+            document.getElementById('logo-nav')?.addEventListener('click', () => {
+                const defaultScreen = appState.user.role === 'Cuidador' ? 'Dashboard' : 'Progresso';
+                navigate(defaultScreen);
+            });
+            document.querySelectorAll('.nav-button').forEach(button => {
+                button.addEventListener('click', (e) => navigate(e.target.dataset.screen));
+            });
+        };
 
-  if (loading) return <div className="p-6 text-center text-xl">Carregando metas...</div>;
+        // --- 3.2. Login Screen ---
+        const renderLoginScreen = (error = '') => `
+            <div class="min-h-screen flex items-center justify-center bg-gray-50 p-4">
+                <div class="bg-white p-8 rounded-xl card-shadow w-full max-w-md border-t-8 border-indigo-600">
+                    <h2 class="text-3xl font-bold text-center text-gray-900 mb-6">Acesso ao Protocolo 8R+</h2>
+                    ${error ? `<p id="login-error" class="text-red-600 bg-red-100 p-2 rounded-lg mb-4 text-sm text-center">${error}</p>` : ''}
+                    
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Nome de Usuário</label>
+                    <input type="text" id="username-input" value="medico" class="w-full p-3 border border-gray-300 rounded-lg mb-4" placeholder="medico ou paciente"/>
 
-  return (
-    <div className="max-w-4xl mx-auto p-6 bg-gray-50 min-h-[90vh]">
-      <h2 className="text-4xl font-extrabold text-gray-900 mb-8 border-b pb-2">
-        Metas e Foco Pessoal (Pilar da Co-criação)
-      </h2>
-      <div className="bg-white p-8 rounded-xl shadow-2xl border-l-8 border-teal-600">
-        <p className="text-gray-600 mb-6">
-          Definir o seu foco ajuda a IA e o seu Cuidador a orientarem melhor o Protocolo 8R+.
-        </p>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Senha</label>
+                    <input type="password" id="password-input" value="123" class="w-full p-3 border border-gray-300 rounded-lg mb-6" placeholder="••••••••"/>
 
-        <label className="block text-lg font-semibold text-gray-700 mb-2">Foco Principal Atual</label>
-        <textarea
-          value={goals.focus}
-          onChange={(e) => setGoals({ ...goals, focus: e.target.value })}
-          className="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 mb-6"
-          rows="3"
-        />
-
-        <label className="block text-lg font-semibold text-gray-700 mb-2">Próximos Passos Terapêuticos</label>
-        <textarea
-          value={goals.nextSteps}
-          onChange={(e) => setGoals({ ...goals, nextSteps: e.target.value })}
-          className="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 mb-6"
-          rows="3"
-        />
-        
-        <button
-          onClick={handleSaveGoals}
-          disabled={!goals.focus || !goals.nextSteps}
-          className="w-full py-3 bg-teal-600 text-white font-bold text-lg rounded-lg shadow-lg hover:bg-teal-700 transition transform hover:scale-[1.01] disabled:opacity-50"
-        >
-          {saveStatus || 'Salvar Minhas Metas'}
-        </button>
-      </div>
-    </div>
-  );
-};
-
-
-// --- Ecrãs Existentes (Passados como placeholders) ---
-const ProfileScreen = ({ user }) => { 
-    // Simplified ProfileScreen for V6 demo purposes
-    const [profileName, setProfileName] = useState('');
-    const [protocol, setProtocol] = useState('');
-    const [loading, setLoading] = useState(true);
-    
-    const initialEncryptedProtocol = useMemo(() => mockEncrypt("Fase 1: Ajuste Imunológico e Neuroemocional - Protocolo Alpha-1"), []);
-
-    useEffect(() => {
-        const encryptedName = localStorage.getItem('encryptedName');
-        const decryptedName = mockDecrypt(encryptedName); 
-        const decryptedProtocol = mockDecrypt(initialEncryptedProtocol);
-        setProfileName(decryptedName || 'Não Encontrado');
-        setProtocol(decryptedProtocol);
-        setLoading(false);
-    }, [initialEncryptedProtocol]);
-    
-    if (loading) return <div className="p-6 text-center text-xl">Carregando perfil seguro...</div>;
-
-    return (
-        <div className="max-w-3xl mx-auto p-6 bg-gray-50 min-h-[90vh]">
-            <h2 className="text-4xl font-extrabold text-gray-900 mb-8 border-b pb-2">Perfil do Paciente (Pilar de Proteção AES-256)</h2>
-            <div className="bg-white p-8 rounded-xl shadow-2xl space-y-6">
-                <div>
-                    <label className="text-sm font-medium text-gray-500 block mb-1">Nome Decriptografado</label>
-                    <p className="text-xl font-bold text-gray-900">{profileName}</p>
-                </div>
-                <div>
-                    <label className="text-sm font-medium text-gray-500 block mb-1">Protocolo 8R+ Atual (Dado Sensível)</label>
-                    <p className="text-lg text-gray-800 bg-indigo-50 p-3 rounded-lg border-l-4 border-indigo-400">{protocol}</p>
+                    <button id="login-button" class="w-full bg-indigo-600 text-white py-3 rounded-lg font-semibold hover:bg-indigo-700 transition duration-150 card-shadow transform hover:scale-[1.01]">
+                        Entrar (Simulação JWT)
+                    </button>
+                    <p class="mt-4 text-xs text-center text-gray-500">
+                        🔓 **CONTAS TESTE:** medico/123 (Cuidador) | paciente/123 (Paciente)
+                    </p>
                 </div>
             </div>
-        </div>
-    );
-};
+        `;
+
+        const attachLoginEvents = () => {
+            document.getElementById('login-button')?.addEventListener('click', handleLogin);
+        };
+
+        const handleLogin = () => {
+            const username = document.getElementById('username-input').value;
+            const password = document.getElementById('password-input').value;
+            
+            const user = mockAuthLogin(username, password);
+            
+            if (user) {
+                localStorage.setItem('token', user.token);
+                localStorage.setItem('userId', user.userId);
+                localStorage.setItem('encryptedName', user.encryptedName);
+                localStorage.setItem('role', user.role);
+                
+                appState.user = user;
+                appState.currentScreen = user.role === 'Cuidador' ? 'Dashboard' : 'Progresso';
+                renderApp();
+            } else {
+                const errorElement = document.getElementById('login-error');
+                const errorMessage = 'Credenciais inválidas. Tente Médico/123 ou Paciente/123';
+                if (errorElement) {
+                    errorElement.innerHTML = errorMessage;
+                } else {
+                    document.getElementById('app').innerHTML = renderLoginScreen(errorMessage);
+                    attachLoginEvents();
+                }
+            }
+        };
 
 
-const PatientProgressScreen = ({ db }) => { 
-    const [metrics, setMetrics] = useState({ frequenciaCardiaca: 0, nivelEstresse: 0 });
-    useEffect(() => {
-      if (!db) return;
-      const docRef = doc(db, PUBLIC_METRICS_PATH);
-      const unsubscribe = onSnapshot(docRef, (docSnap) => {
-        if (docSnap.exists()) {
-          const data = docSnap.data();
-          setMetrics({ frequenciaCardiaca: data.frequenciaCardiaca || 0, nivelEstresse: data.nivelEstresse || 0 });
-        }
-      });
-      return () => unsubscribe();
-    }, [db]);
-    
-    return (
-        <div className="max-w-4xl mx-auto p-6 bg-gray-50 min-h-[90vh]">
-            <h2 className="text-4xl font-extrabold text-gray-900 mb-8 border-b pb-2">Meu Progresso 8R+ (Pilar de Co-criação)</h2>
-            <div className="bg-white p-8 rounded-xl shadow-2xl">
-                <h3 className="text-2xl font-semibold text-gray-800 mb-4">Métricas Vivas</h3>
-                <p className="text-xl text-gray-700 font-medium">Batimento Cardíaco: <span className="text-indigo-600 font-bold">{metrics.frequenciaCardiaca} BPM</span></p>
-                <p className="text-xl text-gray-700 font-medium mt-2">Nível de Estresse: <span className="text-indigo-600 font-bold">{metrics.nivelEstresse} (0-10)</span></p>
-                <p className="mt-6 text-sm text-green-500">Dados em tempo real via Firestore.</p>
+        // --- 3.3. Log de Ação Terapêutica (Sub-Componente) ---
+        const renderTherapyNoteLog = () => {
+            if (!appState.aiAdjustment) return '';
+            const status = document.querySelector('#log-status')?.textContent || '';
+            const note = document.querySelector('#note-textarea')?.value || '';
+            
+            const action = async (actionType) => {
+                const noteValue = document.getElementById('note-textarea').value;
+                if (!appState.db || !appState.user || !appState.aiAdjustment || !noteValue) {
+                    document.getElementById('log-status').textContent = '⚠️ A nota é obrigatória para o registro.';
+                    return;
+                }
+                
+                document.getElementById('log-status').textContent = 'Registrando...';
+                const logData = {
+                    caregiverId: appState.user.userId,
+                    patientId: 'patient002', 
+                    actionType: actionType,
+                    aiRecommendation: appState.aiAdjustment.ajusteTerapeutico,
+                    caregiverNote: noteValue,
+                    metricsSnapshot: appState.metrics,
+                    timestamp: Date.now(),
+                };
+                
+                const logDocRef = doc(appState.db, getTherapyLogPath(appState.user.userId));
+
+                try {
+                    await setDoc(logDocRef, { latestLog: logData }, { merge: true });
+                    document.getElementById('log-status').textContent = '✅ Ação e Nota Registradas com Sucesso! (Privado)';
+                    document.getElementById('note-textarea').value = ''; 
+                } catch (error) {
+                    console.error("Erro ao registrar Nota Terapêutica:", error);
+                    document.getElementById('log-status').textContent = '❌ Erro ao salvar log.';
+                }
+            };
+            
+            // Renderização do HTML do Log
+            return `
+                <div class="bg-gray-50 p-4 rounded-xl shadow-inner border border-gray-200 mt-4">
+                    <h4 class="text-lg font-bold text-gray-800 border-b pb-2 mb-3">
+                        Registro de Ação Terapêutica (Pilar da Proteção - Log de Governança)
+                    </h4>
+                    <textarea
+                        id="note-textarea"
+                        placeholder="Adicione suas notas sobre a decisão (Obrigatório)"
+                        class="w-full p-2 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-sm"
+                        rows="3"
+                    >${note}</textarea>
+                    <div class="mt-3 flex justify-end space-x-3">
+                        <button
+                            id="approve-log-button"
+                            data-action="Aprovado e Executado"
+                            class="px-4 py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 transition disabled:opacity-50"
+                            ${!note ? 'disabled' : ''}
+                        >
+                            Aprovar & Registrar
+                        </button>
+                        <button
+                            id="reject-log-button"
+                            data-action="Rejeitado/Ajuste Manual"
+                            class="px-4 py-2 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 transition disabled:opacity-50"
+                            ${!note ? 'disabled' : ''}
+                        >
+                            Rejeitar & Registrar
+                        </button>
+                    </div>
+                    <p id="log-status" class="mt-3 text-sm text-center font-medium text-gray-700">${status}</p>
+                </div>
+            `;
+        };
+        
+        // --- 3.4. Dashboard do Cuidador ---
+        const renderCaregiverDashboard = () => {
+            const metrics = appState.metrics;
+            const aiAdjustment = appState.aiAdjustment;
+            const loading = appState.isLoading;
+            
+            const adjustmentHtml = aiAdjustment ? `
+                <div class="mt-4 p-4 rounded-xl shadow-inner bg-opacity-10 border-l-4 ${getStatusColor(aiAdjustment.predicao)}">
+                    <p class="font-bold text-gray-800">Previsão da IA: 
+                        <span class="uppercase font-extrabold text-white px-2 py-0.5 rounded-full text-sm ${getStatusColor(aiAdjustment.predicao).replace('border-', 'bg-')}">
+                            ${aiAdjustment.predicao}
+                        </span>
+                    </p>
+                    <p class="mt-2 text-gray-700 text-lg font-medium">${aiAdjustment.ajusteTerapeutico}</p>
+                </div>
+            ` : '';
+
+            return `
+                <div class="max-w-7xl mx-auto p-6 bg-gray-50 min-h-[90vh]">
+                    <h2 class="text-4xl font-extrabold text-gray-900 mb-6 border-b pb-2">
+                        Dashboard do Cuidador | Visão Integrada (IA)
+                    </h2>
+                    
+                    <div class="grid md:grid-cols-3 gap-6 mb-8">
+                        <!-- Bloco de Monitoramento -->
+                        <div class="bg-white p-6 rounded-xl card-shadow border-l-4 border-indigo-500">
+                            <h3 class="text-xl font-semibold text-gray-700 mb-4 flex items-center"><span class="text-indigo-500 mr-2">❤️</span> Monitoramento Real-Time (Firestore)</h3>
+                            <p class="text-4xl font-bold text-gray-800">${metrics.frequenciaCardiaca.toFixed(1)} <span class="text-lg font-normal">BPM</span></p>
+                            <p class="text-4xl font-bold text-gray-800 mt-2">${metrics.nivelEstresse.toFixed(1)} <span class="text-lg font-normal">Estresse (0-10)</span></p>
+                            <p class="text-xs text-green-500 mt-3">✅ Dados persistentes e em tempo real.</p>
+                        </div>
+
+                        <!-- Bloco da IA e Log de Ação -->
+                        <div class="md:col-span-2 bg-white p-6 rounded-xl card-shadow border-l-4 border-purple-600">
+                            <h3 class="text-xl font-semibold text-purple-700 mb-4 flex items-center"><span class="text-purple-600 mr-2">🧠</span> Motor de Terapia (IA Adaptativa)</h3>
+                            
+                            <button
+                                id="request-ai-button"
+                                ${loading ? 'disabled' : ''}
+                                class="w-full bg-purple-600 text-white py-2 rounded-lg font-semibold hover:bg-purple-700 transition duration-150 disabled:opacity-50 flex justify-center items-center"
+                            >
+                                ${loading ? 'Analisando dados...' : 'Solicitar Ajuste Terapêutico da IA'}
+                            </button>
+
+                            ${adjustmentHtml}
+                            
+                            <!-- NOVO: Componente de Log -->
+                            ${renderTherapyNoteLog()}
+                        </div>
+                    </div>
+                </div>
+            `;
+        };
+        
+        // --- 3.5. Definição de Metas (Ecrã do Paciente) ---
+        const renderGoalSettingScreen = (status = '') => {
+            const goals = appState.goals;
+            
+            return `
+                <div class="max-w-4xl mx-auto p-6 bg-gray-50 min-h-[90vh]">
+                    <h2 class="text-4xl font-extrabold text-gray-900 mb-8 border-b pb-2">
+                        Metas e Foco Pessoal (Pilar da Co-criação)
+                    </h2>
+                    <div class="bg-white p-8 rounded-xl card-shadow border-l-8 border-teal-600">
+                        <p class="text-gray-600 mb-6">
+                            Definir o seu foco ajuda a IA e o seu Cuidador a orientarem melhor o Protocolo 8R+.
+                        </p>
+
+                        <label class="block text-lg font-semibold text-gray-700 mb-2">Foco Principal Atual</label>
+                        <textarea
+                            id="goals-focus-textarea"
+                            class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 mb-6"
+                            rows="3"
+                        >${goals.focus}</textarea>
+
+                        <label class="block text-lg font-semibold text-gray-700 mb-2">Próximos Passos Terapêuticos</label>
+                        <textarea
+                            id="goals-next-steps-textarea"
+                            class="w-full p-3 border border-gray-300 rounded-lg focus:ring-teal-500 focus:border-teal-500 mb-6"
+                            rows="3"
+                        >${goals.nextSteps}</textarea>
+                        
+                        <button
+                            id="save-goals-button"
+                            class="w-full py-3 bg-teal-600 text-white font-bold text-lg rounded-lg card-shadow hover:bg-teal-700 transition transform hover:scale-[1.01] disabled:opacity-50"
+                            ${!goals.focus || !goals.nextSteps ? 'disabled' : ''}
+                        >
+                            ${status || 'Salvar Minhas Metas'}
+                        </button>
+                        ${status ? `<p class="mt-3 text-center text-sm font-medium text-gray-700">${status}</p>` : ''}
+                    </div>
+                </div>
+            `;
+        };
+
+        // --- 3.6. Ecrãs Placeholder (Simplificados) ---
+        const renderProfileScreen = () => {
+            const encryptedName = localStorage.getItem('encryptedName');
+            const profileName = mockDecrypt(encryptedName); 
+            const protocol = mockDecrypt(mockEncrypt("Fase 1: Ajuste Imunológico e Neuroemocional - Protocolo Alpha-1"));
+            
+            return `
+                <div class="max-w-3xl mx-auto p-6 bg-gray-50 min-h-[90vh]">
+                    <h2 class="text-4xl font-extrabold text-gray-900 mb-8 border-b pb-2">Perfil do Usuário (Pilar de Proteção AES-256)</h2>
+                    <div class="bg-white p-8 rounded-xl card-shadow space-y-6">
+                        <div>
+                            <label class="text-sm font-medium text-gray-500 block mb-1">Nome Decriptografado</label>
+                            <p class="text-xl font-bold text-gray-900">${profileName}</p>
+                        </div>
+                        <div>
+                            <label class="text-sm font-medium text-gray-500 block mb-1">Protocolo 8R+ Atual (Dado Sensível)</label>
+                            <p class="text-lg text-gray-800 bg-indigo-50 p-3 rounded-lg border-l-4 border-indigo-400">${protocol}</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+        };
+        
+        const renderPatientProgressScreen = () => `
+            <div class="max-w-4xl mx-auto p-6 bg-gray-50 min-h-[90vh]">
+                <h2 class="text-4xl font-extrabold text-gray-900 mb-8 border-b pb-2">Meu Progresso 8R+ (Pilar de Co-criação)</h2>
+                <div class="bg-white p-8 rounded-xl card-shadow">
+                    <h3 class="text-2xl font-semibold text-gray-800 mb-4">Métricas Vivas</h3>
+                    <p class="text-xl text-gray-700 font-medium">Batimento Cardíaco: <span class="text-indigo-600 font-bold">${appState.metrics.frequenciaCardiaca.toFixed(1)} BPM</span></p>
+                    <p class="text-xl text-gray-700 font-medium mt-2">Nível de Estresse: <span class="text-indigo-600 font-bold">${appState.metrics.nivelEstresse.toFixed(1)} (0-10)</span></p>
+                    <p class="mt-6 text-sm text-green-500">Dados em tempo real via Firestore.</p>
+                </div>
             </div>
-        </div>
-    );
-};
-const BreathingExerciseScreen = () => { return <div className="p-6 text-center text-xl font-semibold">Exercício de Respiração Guiada (Mód. Co-criação)</div>; };
-const HealthMonitorScreen = () => { return <div className="p-6 text-center text-xl font-semibold">Monitoramento Detalhado (Mód. Médico) - Placeholder</div>; };
-const ReportsScreen = () => { return <div className="p-6 text-center text-xl font-semibold">Relatório Analítico (Mód. Médico) - Placeholder</div>; };
+        `;
+
+        const renderPlaceholderScreen = (title) => `
+            <div class="p-6 text-center text-xl font-semibold text-gray-700 min-h-[90vh]">
+                <div class="mt-12 p-8 bg-white rounded-xl card-shadow">${title} - Placeholder</div>
+            </div>
+        `;
+        
+        const renderFooter = () => `
+            <footer class="p-4 text-center text-xs text-gray-500 border-t mt-4">
+                Sistema Protocolo 8R+ Integrado V6. **Expansão Funcional Ativada:** Log de Ação Terapêutica (Proteção) e Definição de Metas (Co-criação).
+            </footer>
+        `;
+        
+        const renderMainContent = () => {
+            const userRole = appState.user.role;
+            const screen = appState.currentScreen;
+            let contentHtml = '';
+
+            if (userRole === 'Cuidador') {
+                switch (screen) {
+                    case 'Dashboard': contentHtml = renderCaregiverDashboard(); break;
+                    case 'Monitoramento': contentHtml = renderPlaceholderScreen('Monitoramento Detalhado (Mód. Médico)'); break;
+                    case 'Relatórios': contentHtml = renderPlaceholderScreen('Relatório Analítico (Mód. Médico)'); break;
+                    case 'Perfil': contentHtml = renderProfileScreen(); break;
+                    default: contentHtml = renderCaregiverDashboard();
+                }
+            } else { // Paciente
+                switch (screen) {
+                    case 'Progresso': contentHtml = renderPatientProgressScreen(); break;
+                    case 'Metas': contentHtml = renderGoalSettingScreen(); break;
+                    case 'Respiração': contentHtml = renderPlaceholderScreen('Exercício de Respiração Guiada (Mód. Co-criação)'); break;
+                    case 'Perfil': contentHtml = renderProfileScreen(); break;
+                    default: contentHtml = renderPatientProgressScreen();
+                }
+            }
+            return `<main>${contentHtml}</main>`;
+        };
+
+        // ===========================================================================
+        // ⚡ BLOCO 4: EVENTOS E LÓGICA DE INTERAÇÃO
+        // ===========================================================================
+
+        const handleAIRequest = async () => {
+            appState.isLoading = true;
+            updateAIAdjustment(null); 
+            
+            try {
+                const adjustment = await simulateAIAdjustment(appState.metrics);
+                updateAIAdjustment(adjustment);
+            } catch (error) {
+                updateAIAdjustment({ predicao: 'Erro', ajusteTerapeutico: 'Falha de comunicação com o Motor de Terapia.', mensagemAI: 'Erro.' });
+            } finally {
+                appState.isLoading = false;
+                renderApp(); 
+            }
+        };
+        
+        const handleGoalSave = async () => {
+            const focus = document.getElementById('goals-focus-textarea').value;
+            const nextSteps = document.getElementById('goals-next-steps-textarea').value;
+            
+            appState.goals = { focus, nextSteps };
+            
+            const goalsDocRef = doc(appState.db, getPatientGoalsPath(appState.user.userId));
+            const saveButton = document.getElementById('save-goals-button');
+            
+            // Rerender com status de salvando
+            document.getElementById('app').innerHTML = renderHeader() + renderMainContent({ status: 'Salvando...' }) + renderFooter();
+            
+            try {
+                await setDoc(goalsDocRef, appState.goals, { merge: true });
+                // Rerender com status de sucesso
+                document.getElementById('app').innerHTML = renderHeader() + renderMainContent({ status: '✅ Metas salvas com sucesso! (Privado)' }) + renderFooter();
+            } catch (error) {
+                console.error("Erro ao salvar metas:", error);
+                // Rerender com status de erro
+                document.getElementById('app').innerHTML = renderHeader() + renderMainContent({ status: '❌ Erro ao salvar metas.' }) + renderFooter();
+            }
+            
+            // Re-anexar eventos após a renderização
+            attachHeaderEvents();
+            attachMainContentEvents();
+        };
 
 
-// ===========================================================================
-// 🚀 BLOCO 3: APP PRINCIPAL (ROTEAMENTO CENTRALIZADO - O NÓ)
-// ===========================================================================
+        const attachMainContentEvents = () => {
+            // Dashboard do Cuidador
+            const aiButton = document.getElementById('request-ai-button');
+            if (aiButton) {
+                aiButton.addEventListener('click', handleAIRequest);
+            }
+            
+            const noteTextarea = document.getElementById('note-textarea');
+            const approveLogButton = document.getElementById('approve-log-button');
+            const rejectLogButton = document.getElementById('reject-log-button');
 
-const MainContentRouter = ({ user, currentScreen, db }) => {
-  if (user.role === 'Cuidador') {
-    switch (currentScreen) {
-      case 'Dashboard': return <CaregiverDashboard user={user} db={db} />;
-      case 'Monitoramento': return <HealthMonitorScreen />;
-      case 'Relatórios': return <ReportsScreen />;
-      case 'Perfil': return <ProfileScreen user={user} />;
-      default: return <CaregiverDashboard user={user} db={db} />;
-    }
-  } 
-  else { // Paciente
-    switch (currentScreen) {
-      case 'Progresso': return <PatientProgressScreen user={user} db={db} />;
-      case 'Metas': return <GoalSettingScreen user={user} db={db} />; // NOVO
-      case 'Respiração': return <BreathingExerciseScreen />;
-      case 'Perfil': return <ProfileScreen user={user} />;
-      default: return <PatientProgressScreen user={user} db={db} />;
-    }
-  }
-};
+            if (noteTextarea && approveLogButton && rejectLogButton) {
+                // Habilita/Desabilita botões ao digitar
+                noteTextarea.addEventListener('input', () => {
+                    const isDisabled = noteTextarea.value.trim().length === 0;
+                    approveLogButton.disabled = isDisabled;
+                    rejectLogButton.disabled = isDisabled;
+                });
+                
+                // Anexa eventos de log
+                approveLogButton.addEventListener('click', () => {
+                    // O valor da nota é lido dentro da função de ação no renderTherapyNoteLog
+                    const action = approveLogButton.dataset.action;
+                    action(action); 
+                });
+                rejectLogButton.addEventListener('click', () => {
+                    const action = rejectLogButton.dataset.action;
+                    action(action); 
+                });
+            }
+
+            // Metas do Paciente
+            const saveGoalsButton = document.getElementById('save-goals-button');
+            const goalsFocusTextarea = document.getElementById('goals-focus-textarea');
+            const goalsNextStepsTextarea = document.getElementById('goals-next-steps-textarea');
+
+            if (saveGoalsButton && goalsFocusTextarea && goalsNextStepsTextarea) {
+                const updateGoalData = () => {
+                    appState.goals.focus = goalsFocusTextarea.value;
+                    appState.goals.nextSteps = goalsNextStepsTextarea.value;
+                    // Força a re-verificação para desabilitar/habilitar
+                    saveGoalsButton.disabled = goalsFocusTextarea.value.trim() === '' || goalsNextStepsTextarea.value.trim() === '';
+                };
+
+                goalsFocusTextarea.addEventListener('input', updateGoalData);
+                goalsNextStepsTextarea.addEventListener('input', updateGoalData);
+                saveGoalsButton.addEventListener('click', handleGoalSave);
+                
+                // Inicializa o estado do botão
+                updateGoalData();
+            }
+        };
+
+        // ===========================================================================
+        // ⚙️ BLOCO 5: INICIALIZAÇÃO DO FIREBASE E LOOP DE DADOS
+        // ===========================================================================
+
+        const setupFirestoreListeners = () => {
+            if (!appState.db || !appState.authReady) return;
+
+            // --- 5.1. Listener de Métricas Públicas (Read/Simulação) ---
+            const metricsDocRef = doc(appState.db, PUBLIC_METRICS_PATH);
+            
+            // 5.1.1. Inicia o listener em tempo real
+            onSnapshot(metricsDocRef, (docSnap) => {
+                let data = { frequenciaCardiaca: 70.0, nivelEstresse: 3.5 };
+                if (docSnap.exists()) {
+                    data = docSnap.data();
+                } else {
+                    setDoc(metricsDocRef, data, { merge: true });
+                }
+                updateMetrics(data);
+            }, (error) => {
+                console.error("Erro ao escutar métricas do Firestore:", error);
+            });
+            
+            // 5.1.2. Simulação de escrita (para manter os dados "vivos")
+            setInterval(() => {
+                const newMetrics = {
+                    frequenciaCardiaca: parseFloat((Math.random() * (95 - 70) + 70).toFixed(1)),
+                    nivelEstresse: parseFloat((Math.random() * 6 + 1).toFixed(1)),
+                    lastUpdate: Date.now()
+                };
+                setDoc(metricsDocRef, newMetrics, { merge: true }).catch(err => {
+                    console.error("Erro ao salvar métricas simuladas no Firestore:", err);
+                });
+            }, 5000);
+            
+            // --- 5.2. Carregar Metas do Paciente (Se for paciente) ---
+            if (appState.user && appState.user.role === 'Paciente') {
+                const goalsDocRef = doc(appState.db, getPatientGoalsPath(appState.user.userId));
+                getDoc(goalsDocRef).then(docSnap => {
+                    if (docSnap.exists()) {
+                        updateGoals(docSnap.data());
+                    } else {
+                        // Valores padrão se não houver dados
+                        updateGoals({ focus: 'Recuperação do sono e redução do estresse diário.', nextSteps: 'Completar 3 sessões de respiração por semana.' });
+                    }
+                }).catch(error => console.error("Erro ao carregar metas do paciente:", error));
+            }
+        };
 
 
-const App = () => {
-  const [user, setUser] = useState(null);
-  const [currentScreen, setCurrentScreen] = useState('Dashboard');
-  const [db, setDb] = useState(null);
-  const [authReady, setAuthReady] = useState(false);
+        const initializeAppAndAuth = async () => {
+            const app = initializeApp(firebaseConfig);
+            appState.auth = getAuth(app);
+            appState.db = getFirestore(app);
+            
+            // Log Level: Essencial para diagnosticar problemas de conexão no console
+            setLogLevel('debug'); 
 
-  // 1. Inicialização Firebase e Autenticação
-  useEffect(() => {
-    const app = initializeApp(firebaseConfig);
-    const auth = getAuth(app);
-    const firestore = getFirestore(app);
-    setDb(firestore);
-    
-    // Configuração de Log: Obrigatória para diagnosticar problemas de conexão do Firestore
-    setLogLevel('debug'); 
+            // Tenta autenticar
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(appState.auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(appState.auth);
+                }
+            } catch (e) {
+                console.error("Erro na autenticação Firebase:", e);
+            }
 
-    const authenticate = async () => {
-      try {
-        if (initialAuthToken) {
-          await signInWithCustomToken(auth, initialAuthToken);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (e) {
-        console.error("Erro na autenticação Firebase:", e);
-      }
-    };
-    authenticate();
+            // Observador de estado de autenticação
+            onAuthStateChanged(appState.auth, (currentUser) => {
+                if (currentUser) {
+                    console.log("Usuário autenticado:", currentUser.uid);
+                }
+                appState.authReady = true;
+                
+                // Carregar estado do usuário (local storage)
+                const token = localStorage.getItem('token');
+                const encryptedName = localStorage.getItem('encryptedName');
+                const role = localStorage.getItem('role');
+                
+                if (token && encryptedName && role) {
+                    const name = mockDecrypt(encryptedName); 
+                    appState.user = { name, token, role, userId: localStorage.getItem('userId') };
+                    appState.currentScreen = role === 'Cuidador' ? 'Dashboard' : 'Progresso';
+                }
+                
+                // Renderiza após a autenticação e carregamento do estado local
+                renderApp();
+                setupFirestoreListeners();
+            });
+        };
 
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      if (currentUser) {
-        console.log("Usuário autenticado:", currentUser.uid);
-      }
-      setAuthReady(true);
-    });
-
-    return () => unsubscribe();
-  }, []);
-
-  // 2. Carregar estado do usuário (local storage)
-  useEffect(() => {
-    if (!authReady) return; // Espera a autenticação
-
-    const token = localStorage.getItem('token');
-    const encryptedName = localStorage.getItem('encryptedName');
-    const role = localStorage.getItem('role');
-    
-    if (token && encryptedName && role) {
-      const name = mockDecrypt(encryptedName); 
-      setUser({ name, token, role, userId: localStorage.getItem('userId') }); // Inclui userId
-      setCurrentScreen(role === 'Cuidador' ? 'Dashboard' : 'Progresso');
-    }
-  }, [authReady]);
-
-  const handleLogin = (userInfo) => {
-    setUser(userInfo);
-    setCurrentScreen(userInfo.role === 'Cuidador' ? 'Dashboard' : 'Progresso');
-  };
-
-  const handleLogout = () => {
-    localStorage.clear();
-    setUser(null);
-    setCurrentScreen('Dashboard');
-  };
-
-  const isLoading = !authReady;
-
-  if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 p-4">
-        <p className="text-xl font-medium text-indigo-600">Conectando ao Núcleo de Dados...</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-gray-100 font-sans">
-      <script src="https://cdn.tailwindcss.com"></script>
-      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-      
-      {user && <Header onNavigate={setCurrentScreen} currentScreen={currentScreen} user={user} handleLogout={handleLogout} />}
-      
-      <main>
-        {user ? (
-          <MainContentRouter user={user} currentScreen={currentScreen} db={db} />
-        ) : (
-          <LoginScreen onLogin={handleLogin} />
-        )}
-      </main>
-      
-      <footer className="p-4 text-center text-xs text-gray-500 border-t mt-4">
-        Sistema Protocolo 8R+ Integrado V6. **Expansão Funcional Ativada:** Log de Ação Terapêutica (Proteção) e Definição de Metas (Co-criação).
-      </footer>
-    </div>
-  );
-};
-
-export default App;
-
-  }
+        // Inicia a aplicação no carregamento da janela
+        window.onload = () => {
+            appState.isLoading = true;
+            renderApp();
+            initializeAppAndAuth();
+        };
 
     </script>
 </body>
 </html>
-
-
